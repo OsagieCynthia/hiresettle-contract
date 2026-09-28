@@ -22,6 +22,24 @@ pub enum MilestoneStatus {
     /// The milestone counts as done for the purposes of completing the engagement.
     Resolved,
 }
+/// Category of an [`crate::TimelineEntry`] returned by
+/// `get_engagement_timeline` (issue #501). When entries share a ledger they
+/// are ordered by this declaration order.
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum TimelineKind {
+    /// An accepted co-recruiter split amendment (`get_split_amendment_log`).
+    Amendment,
+    /// A replacement request (`get_replacement_record` / `get_replacement_reason`).
+    Replacement,
+    /// Reserved for milestone deadline extensions. Nothing records extensions
+    /// in this contract version, so no entry of this kind is produced yet.
+    Extension,
+    /// A dispute raised on a milestone (`get_dispute_history`).
+    Dispute,
+    /// An engagement status transition (`get_status_history`).
+    StatusChange,
+}
 /// Distinguishes the two business-logic types of milestones.
 #[contracttype]
 #[derive(Clone, PartialEq)]
@@ -336,5 +354,19 @@ pub enum DataKey2 {
     EmergencyVotes(String),
     /// Per-company, per-token redeemable fee rebate balance (issue #475).
     CompanyRebate(Address, Address),
+    /// Who requested replacement `replacement_index` and at which ledger
+    /// (issue #501); written alongside `DataKey::ReplacementReason`.
+    ReplacementRecord(String, u32),
+    /// Durable, FIFO-capped history of disputes raised on an engagement
+    /// (issue #501). Unlike `DataKey::DisputeReason`, it is not cleared when
+    /// the dispute resolves.
+    DisputeHistory(String),
+    /// FIFO-capped history of engagement status transitions (issue #501).
+    StatusHistory(String),
+    /// Platform-fee bps resolved from the fee tiers at creation, present only
+    /// for engagements created with `snapshot_fee_tier` (issue #505).
+    FeeTierSnapshot(String),
+    /// Co-recruiter collateral bond for an engagement (issue #506).
+    CoRecruiterBond(String),
 }
 

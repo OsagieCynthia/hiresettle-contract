@@ -45,6 +45,7 @@ mod payout;
 mod ratings;
 mod bonds;
 mod features;
+mod timeline;
 
 pub(crate) use constants::*;
 pub(crate) use errors::*;

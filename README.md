@@ -281,6 +281,8 @@ The full on-chain record:
 Passed at creation to stay within Soroban's 10-parameter limit:
 - `metadata_hash` (Option<String>), `contract_pdf_hash` (Option<String>)
 - `co_recruiter` (Option<Address>), `recruiter_split_bps` (u32)
+- `snapshot_fee_tier` (bool) — freeze the fee tier at creation; see [Snapshot mode](#snapshot-mode-505)
+- `co_recruiter_bond_amount` (Option<i128>) — co-recruiter collateral; see [Co-recruiter bond](#co-recruiter-bond-506)
 
 ### `EngagementStatus`
 `Active` → `Completed` | `Cancelled` | `Expired` | `ReplacementRequested` | `ExitRequested`
@@ -486,6 +488,12 @@ Example with base fee `200` bps and two tiers `(10_000_000, 150)` then `(100_000
 
 The 500 bps `FeeTooHigh` cap is enforced on `set_platform_fee`, not here. A tier cannot charge **more** than the current base fee (tiers are discounts for larger size, not surcharges). Caller must also be admin and the contract must not be paused (`ContractPaused`, `NoAdmin`, `unauthorized`).
 
+#### Snapshot mode (#505)
+
+By default an engagement's tier is re-resolved against the live tier list at every payout, so a later `set_fee_tiers` call changes the rate of engagements already in flight. Setting `EngagementConfig::snapshot_fee_tier = true` resolves the tier once in `create_engagement` and reuses it for every later payout on that engagement. When no tier matches, the base rate at creation is frozen instead.
+
+Only the tier lookup is frozen. At payout time a fee waiver still zeroes the fee, and the live referral discount is still subtracted from the frozen rate. `get_fee_tier_snapshot(engagement_id)` returns the frozen bps, or `None` for engagements that track the live tiers. The snapshot is not re-resolved when `top_up_escrow` grows `total_amount`.
+
 ### Referral discount
 
 Engagements may carry an optional `referrer` address (set at creation via
@@ -645,6 +653,11 @@ All `DataKey2` entries are persistent.
 | `EmergencySigners` | Emergency M-of-N signer set and threshold (#474) |
 | `EmergencyVotes(engagement_id)` | Emergency pause vote tally; empty string means a global pause (#474) |
 | `CompanyRebate(company, token)` | Redeemable fee rebate balance (#475) |
+| `ReplacementRecord(engagement_id, replacement_index)` | Who requested a replacement and at which ledger (#501) |
+| `DisputeHistory(engagement_id)` | Every dispute raised, kept after resolution; last 50 (#501) |
+| `StatusHistory(engagement_id)` | Every engagement status transition; last 50 (#501) |
+| `FeeTierSnapshot(engagement_id)` | Fee bps frozen at creation for `snapshot_fee_tier` engagements (#505) |
+| `CoRecruiterBond(engagement_id)` | Co-recruiter collateral bond (#506) |
 
 ---
 
@@ -797,6 +810,42 @@ Each proposal carries an expiry ledger computed as `proposed_at_ledger + extensi
 | Who accepts/rejects | The other party | Company only |
 | Repeat limit | None (20-entry history log, no proposal cap) | Capped at `get_max_milestone_extensions()` grants per milestone (default 3) |
 | TTL constant | `amendment_ttl` | `extension_ttl` |
+
+---
+
+## Engagement Timeline
+
+`get_engagement_timeline(engagement_id, page, page_size)` returns one page of everything that happened on an engagement, oldest first, as `TimelineEntry { kind, milestone_index, actor, ledger, source_index }` (#501). It is merged at read time from the per-kind histories, so it always agrees with them:
+
+| `kind` | Source | `milestone_index` | `actor` |
+|---|---|---|---|
+| `Amendment` | `get_split_amendment_log` | `None` | Proposer |
+| `Replacement` | `get_replacement_record` / `get_replacement_reason` | `None` | Company |
+| `Extension` | Reserved; milestone extensions are not recorded in this version | — | — |
+| `Dispute` | `get_dispute_history` | Disputed milestone | Company or its co-signer |
+| `StatusChange` | `get_status_history` | `None` | Caller; `None` for permissionless calls |
+
+Entries are sorted by ledger. Entries on the same ledger follow the `kind` order above; for example, a replacement comes before the status change it causes. `source_index` is the entry's position in its source, or the `replacement_index` for replacements. Paging follows the other list queries: `page` is 0-indexed, and a `page_size` of 0, a page past the end, or an engagement with no history returns an empty vec.
+
+The dispute, status and split-amendment histories keep their most recent entries only (50, 50 and 20), and replacements requested before replacement records existed have no ledger, so neither appears in the timeline.
+
+---
+
+## Collateral Bonds
+
+### Recruiter bond (#459)
+
+`EngagementConfig::recruiter_bond_amount` escrows a bond from the recruiter at creation. When the engagement reaches `Completed`, `Cancelled` or `Expired`, the bond is settled once. If some milestone had a dispute resolve against its proof and was never confirmed or resolved afterwards, `get_bond_forfeit_bps` of the bond (default 100 %) goes to the company. Otherwise the whole bond returns to the recruiter. Query it with `get_recruiter_bond`.
+
+### Co-recruiter bond (#506)
+
+`EngagementConfig::co_recruiter_bond_amount` escrows a separate bond from the `co_recruiter` at creation. It is ignored when there is no co-recruiter. It uses the same trigger as the recruiter bond, tracked on its own record, and is settled independently. The co-recruiter shares in payouts, so it shares the liability in proportion to its payout share:
+
+```text
+co_forfeit = co_bond × bond_forfeit_bps × (10_000 − recruiter_split_bps) ÷ 10_000²
+```
+
+`recruiter_split_bps` is read at settlement. The rest returns to the co-recruiter, and the recruiter bond's own forfeiture does not change. Query it with `get_co_recruiter_bond(engagement_id)` → `Option<(amount, forfeited)>`.
 
 ---
 
@@ -980,6 +1029,7 @@ holds, so a keeper or either party can run them.
 | Tune timing windows | `set_confirm_window`, `set_dispute_window`, `set_proof_cooldown`, `set_cooldown_rating_discount`, `set_no_show_deadline_ledgers`, `set_amendment_ttl`, `set_super_arbiter_deadline` |
 | Tune limits | `set_max_active_per_company`, `set_max_replacements` |
 | Configure arbitration | `set_super_arbiter`, `set_arbiter_fee`, `set_split_voting_enabled`, `add_arbiter_pool_member`, `remove_arbiter_pool_member`, `set_bond_forfeit_bps` |
+| Grow or shrink one engagement's arbiter panel | `admin_add_arbiter` / `admin_remove_arbiter` |
 | Configure payout-token swaps | `set_swap_adapter` / `clear_swap_adapter` |
 | Mark a recruiter as verified | `set_recruiter_verified` |
 | Upgrade the contract | `set_upgrade_lock_duration`, `propose_upgrade`, then anyone calls `execute_upgrade` |
@@ -1247,6 +1297,17 @@ claim_arbiter()
 
 Only the nominated address can complete the claim. Once claimed, the successor assumes the arbiter's position for future dispute voting while preserving the integrity of the arbitration panel.
 
+#### Admin Panel Resize (#507)
+
+Succession swaps one slot for another. To change the panel's size instead, the admin calls:
+
+| Function | Purpose |
+|---|---|
+| `admin_add_arbiter(admin, engagement_id, new_arbiter, new_quorum)` | Append a slot. Quorum is unchanged unless `new_quorum` is `Some`. On a weighted panel the new slot has weight 1. |
+| `admin_remove_arbiter(admin, engagement_id, arbiter, new_quorum)` | Remove a slot and its weight. Panics `QuorumUnreachable` if the current quorum would exceed the remaining panel, unless `new_quorum` supplies a reachable one. Also clears the removed arbiter's vote delegate and any succession nomination it made. |
+
+Whenever `new_quorum` is given, it must be between 1 and the new panel's total weight (`invalid quorum`). Both calls panic `PanelChangeDuringDispute` while any milestone is `Disputed`, and reject terminal engagements. Like other admin panel repairs, they still work on a quarantined engagement. Other panics: `DuplicateArbiter`, `CompanyArbiterCollision` and `RecruiterArbiterCollision` on add; `ArbiterNotFound` and `at least one arbiter required` on remove. They emit `arbiter_added` or `arbiter_removed` with `(arbiter, quorum)`.
+
 #### Dispute Escalation to Super Arbiter
 
 If a dispute's arbiter votes remain split — neither the approval quorum nor the
@@ -1375,7 +1436,10 @@ argument and return-type details.
 | Show amendment history for a milestone | `get_amendment_log` |
 | Show arbiter vote tally on a dispute | `get_arbiter_votes` |
 | Show why a milestone is in dispute | `get_dispute_reason` |
-| Show replacement history / reason | `get_replacement_count` / `get_replacement_reason` |
+| Show replacement history / reason | `get_replacement_count` / `get_replacement_reason` / `get_replacement_record` |
+| Show everything that happened on an engagement, in order | `get_engagement_timeline` |
+| Show past disputes / status transitions | `get_dispute_history` / `get_status_history` |
+| Show a recruiter's / co-recruiter's bond | `get_recruiter_bond` / `get_co_recruiter_bond` |
 | Fetch the contract PDF / metadata hash | `get_contract_pdf_hash` / `get_metadata_hash` |
 | Is the contract (or one engagement) paused? | `is_paused` / `is_engagement_paused` |
 | Load current config in one call (indexers) | `get_config_snapshot` |
@@ -1502,6 +1566,7 @@ means "no ratings yet", not "rated zero".
 |---|---|---|
 | `get_replacement_reason` | `engagement_id: String`, `replacement_index: u32` | `Option<String>` |
 | `get_replacement_count` | `engagement_id: String` | `u32` |
+| `get_replacement_record` | `engagement_id: String`, `replacement_index: u32` | `Option<ReplacementRecord>` |
 
 #### Contract Config Getters
 

@@ -297,6 +297,17 @@ impl HireSettleContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Return the platform-fee bps snapshotted for an engagement created with
+    /// `snapshot_fee_tier` (issue #505), or `None` if it tracks the live fee
+    /// tiers. The snapshot is the base rate as tiered at creation, before any
+    /// referral discount or fee waiver, and is not re-resolved when
+    /// `top_up_escrow` grows `total_amount`.
+    pub fn get_fee_tier_snapshot(env: Env, engagement_id: String) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::FeeTierSnapshot(engagement_id))
+    }
+
     /// Admin removes a single fee tier by its `threshold` without replacing
     /// the whole list. Panics if no tier with the given threshold exists.
     /// Remaining tiers keep their relative order; the invariant that thresholds
@@ -873,10 +884,11 @@ impl HireSettleContract {
             &engagement_id,
             old_engagement_status,
             engagement.status.clone(),
+            None,
         );
 
         Self::decrement_company_active_count(&env, &engagement.company);
-        Self::settle_recruiter_bond(&env, &engagement);
+        Self::settle_bonds(&env, &engagement);
 
         env.events().publish(
             (
@@ -921,13 +933,25 @@ impl HireSettleContract {
         }
     }
 
+    /// Emit `status_changed` and append the transition to the engagement's
+    /// status history (issue #501). `actor` is the address whose call caused
+    /// the transition, or `None` for permissionless calls. No-op when the
+    /// status did not change.
     pub(crate) fn emit_engagement_status_changed(
         env: &Env,
         engagement_id: &String,
         old_status: EngagementStatus,
         new_status: EngagementStatus,
+        actor: Option<Address>,
     ) {
         if old_status != new_status {
+            Self::record_status_change(
+                env,
+                engagement_id,
+                old_status.clone(),
+                new_status.clone(),
+                actor,
+            );
             env.events().publish(
                 (Symbol::new(env, "status_changed"), engagement_id.clone()),
                 (old_status, new_status),
