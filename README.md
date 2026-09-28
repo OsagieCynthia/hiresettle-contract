@@ -281,6 +281,7 @@ The full on-chain record:
 Passed at creation to stay within Soroban's 10-parameter limit:
 - `metadata_hash` (Option<String>), `contract_pdf_hash` (Option<String>)
 - `co_recruiter` (Option<Address>), `recruiter_split_bps` (u32)
+- `is_public` (bool) — opt the engagement into `get_public_engagement_ids`. Set once at creation and cannot be changed afterwards. See [Engagement visibility](#engagement-visibility).
 
 ### `EngagementStatus`
 `Active` → `Completed` | `Cancelled` | `Expired` | `ReplacementRequested` | `ExitRequested`
@@ -441,7 +442,7 @@ gross_share = total_amount × payment_percent ÷ 100
 fee_amount = gross_share × platform_fee_bps ÷ 10_000
 net_payment = gross_share − fee_amount // this is what the recruiter actually receives
 
-`fee_amount` is transferred to `treasury`; a `platform_fee_collected` event `(milestone_index, fee_amount, treasury)` is emitted whenever `fee_amount > 0` (no event when the fee is 0). Disputes resolved via `cast_arbiter_vote` do **not** deduct the platform fee — they deduct a separate, arbiter-only fee instead (see `set_arbiter_fee`).
+`fee_amount` is transferred to `treasury`; a `platform_fee_collected` event `(milestone_index, fee_amount, treasury)` is emitted whenever `fee_amount > 0` (no event when the fee is 0). Approved disputes (`cast_arbiter_vote`, `cast_arbiter_split_vote`, `super_arbiter_resolve`) also deduct the platform fee, then take the arbiter fee from what is left (see `set_arbiter_fee`). Not every payout path applies fee tiers and the referral discount the same way; see [Which fee reductions apply on each payout path](#which-fee-reductions-apply-on-each-payout-path).
 
 When fee tiers are configured, `platform_fee_bps` in the formula above is the **resolved** rate for that engagement's `total_amount` (see [Fee tiers](#fee-tiers)), not necessarily the base `PlatformFee.bps` returned by `get_platform_fee()`.
 
@@ -500,9 +501,10 @@ Admin setup:
   engagement’s `referrer` is on that list (max 500 bps, same cap as the platform
   fee). Default discount is `0`.
 
-At milestone confirmation (`confirm_milestone`, `batch_confirm_milestones`,
-`force_confirm_milestone`), the contract computes an **effective** platform-fee
-rate as follows:
+On `confirm_milestone` the contract computes an **effective** platform-fee
+rate as follows. Other payout paths skip some of these steps; see
+[Which fee reductions apply on each payout path](#which-fee-reductions-apply-on-each-payout-path).
+An admin [fee waiver](#fee-waiver) overrides all of them.
 
 1. Start from the configured platform fee `bps` (or the matching **fee tier**
    rate when `set_fee_tiers` is in use — larger `total_amount` can qualify for a
@@ -527,6 +529,35 @@ pub struct PlatformFee {
     pub bps: u32,                    // fee in basis points (max 500 = 5%)
     pub treasury: Address,           // fee recipient
 }
+```
+
+### Fee waiver
+
+The admin can switch off the platform fee for a single engagement, for example a promotional or goodwill placement, without changing the contract-wide fee.
+
+| Function | Caller | Description | Panics |
+|---|---|---|---|
+| `waive_platform_fee(admin, engagement_id)` | Admin | Waive the platform fee for every **future** payout on this engagement. | `NoAdmin`, `unauthorized`, `engagement not found` |
+| `is_fee_waived(engagement_id)` → `bool` | Anyone | Return `true` if a waiver has been recorded. Unknown IDs return `false` instead of panicking. | — |
+
+Behaviour:
+
+- **It overrides every other fee setting.** While a waiver is in place the effective platform-fee rate is `0`, whatever the base `PlatformFee.bps`, the matching fee tier or the referral discount. This applies on every path that pays out a milestone: `confirm_milestone`, `batch_confirm_milestones`, `force_confirm_milestone`, `cast_arbiter_vote`, `cast_arbiter_split_vote`, `super_arbiter_resolve` and `resolve_escalation_timeout`.
+- **Only the platform fee is waived.** On an approved dispute the arbiter fee (`set_arbiter_fee`) is still deducted, now from the full gross share.
+- **No rebate activity.** With a fee of `0`, `collect_platform_fee` never runs, so the company's fee-rebate balance (`set_fee_rebate_bps` / `redeem_company_rebate`) is neither drawn down nor credited for waived payouts.
+- **It is not retroactive.** Fees already sent to the treasury before the waiver are not refunded.
+- **It is permanent.** No function removes a waiver. To charge fees again you would need a new engagement.
+- **It is idempotent.** Waiving an engagement that is already waived changes no state, but it emits the event again and refreshes the entry's TTL.
+- **It is not blocked by the global pause.** The function only checks admin authority, so it works while the contract is paused. It works on an engagement in any status.
+
+Storage: `DataKey::FeeWaived(engagement_id)` → `true`, persistent, TTL extended to `6_300_000` ledgers on each call.
+
+Event: `("platform_fee_waived", engagement_id)` with data `(admin,)`.
+
+```rust
+// Admin waives the fee; later confirmations pay the recruiter the full gross share.
+client.waive_platform_fee(&admin, &engagement_id);
+assert!(client.is_fee_waived(&engagement_id));
 ```
 
 ### `DataKey`
@@ -994,6 +1025,8 @@ Functions that manage contract-wide settings, admin succession, and operational 
 | `set_platform_fee(admin, bps, treasury)` | Admin | Set platform fee in basis points (max 500 = 5%) and recipient treasury. | `ContractPaused`, `NoAdmin`, `unauthorized`, `FeeTooHigh` |
 | `get_platform_fee()` → `(u32, Address)` | Anyone | Return current **base** `(bps, treasury)`; defaults to `(0, admin)`. Does not resolve fee tiers. | — |
 | `set_fee_tiers(admin, tiers)` | Admin | Replace the fee-tier list (max 10, strictly ascending `threshold`, each `bps` ≤ base platform fee). Empty vec clears tiers. | `ContractPaused`, `NoAdmin`, `unauthorized`, `too many fee tiers`, `tier bps exceeds base platform fee`, `tier threshold must be positive`, `tiers must be sorted by ascending threshold` |
+| `waive_platform_fee(admin, engagement_id)` | Admin | Permanently zero the platform fee for future payouts on one engagement. Overrides base fee, tiers and referral discount. Not blocked by pause. See [Fee waiver](#fee-waiver). | `NoAdmin`, `unauthorized`, `engagement not found` |
+| `is_fee_waived(engagement_id)` → `bool` | Anyone | Return `true` if the engagement's platform fee is waived. Unknown IDs return `false`. | — |
 | `get_fee_tiers()` → `Vec<FeeTier>` | Anyone | Return configured tiers; empty vec means flat base fee. | — |
 | `set_version(admin, version)` | Admin | Set a version label (max 32 chars); does not check upgrade or storage compatibility. | `NoAdmin`, `unauthorized`, `VersionTooLong` |
 | `set_min_amount(admin, amount)` | Admin | Set minimum engagement amount in raw token units. | `NoAdmin`, `unauthorized` |
@@ -1360,6 +1393,7 @@ argument and return-type details.
 |---|---|
 | Show a company their active engagements | `get_engagements_by_company` + `get_company_active_count` |
 | Show all engagements (admin / explorer view) | `get_engagement_ids_by_status` + `get_engagement_count` |
+| List engagements that opted into public listing (job board / explorer) | `get_public_engagement_ids` |
 | Show one engagement's full detail | `get_engagement` / `get_engagement_summary` |
 | Show an engagement's milestone list + status | `get_all_milestone_statuses` |
 | Show a single milestone's detail | `get_milestone` |
@@ -1437,6 +1471,7 @@ dashboard render a list view without one round-trip per row.
 | `get_engagement_count_by_status` | `status: EngagementStatus` | `u32` |
 | `get_engagements_by_amount_range` | `min_amount: i128`, `max_amount: i128`, `page: u32`, `page_size: u32` | `Vec<String>` |
 | `get_engagement_count_by_amount` | `min_amount: i128`, `max_amount: i128` | `u32` |
+| `get_public_engagement_ids` | `page: u32`, `page_size: u32` | `Vec<String>` |
 
 `get_engagement_ids_by_status` paginates the **filtered** result, so page 0 always
 holds the first `page_size` matches regardless of how many non-matching
@@ -1473,6 +1508,44 @@ engagements created before the index existed, and skip expired records. Both
 panic with `"InvalidAmountRange"` when `min_amount > max_amount`; the paginated
 query checks `page_size == 0` first, so a zero page size returns an empty vec
 even for an inverted range.
+
+##### Engagement visibility
+
+Every engagement has an `is_public` flag. It is copied from
+`EngagementConfig::is_public` in `create_engagement` and defaults to `false` in
+the usual config. Only `get_public_engagement_ids` reads it, and that function
+returns the IDs of engagements created with `is_public: true`.
+
+```rust
+let mut config = default_config();
+config.is_public = true;               // opt in at creation
+client.create_engagement(/* ..., */ &config);
+
+let page0 = client.get_public_engagement_ids(&0, &50); // first 50 public IDs
+```
+
+- **It is a listing flag, not access control.** A private engagement is only
+  left out of this one enumeration. Soroban ledger state is public, so a
+  private engagement stays fully readable by anyone who knows its ID
+  (`get_engagement`, `get_engagement_summary`, …). It also still appears in
+  `get_engagement_ids_by_status`, `get_engagements_by_amount_range`,
+  `get_engagements_by_company` and `get_engagements_by_recruiter`, and in
+  every event it emits. Never use `is_public: false` to hide sensitive data.
+- **It is fixed at creation.** No function flips `is_public` later, and it is
+  not an amendable field. To change visibility you need a new engagement.
+- **It is independent of status.** Completed, cancelled and expired public
+  engagements are still listed. Filter on status client-side if you only want
+  open roles.
+- **Pagination** works like `get_engagement_ids_by_status`. `page` is
+  0-indexed over the **public** matches only, `page_size == 0` returns an empty
+  vec, and a page past the last match comes back empty, so iterate until you
+  get an empty page. No count function exists for public engagements.
+- **Cost and coverage** are also the same as `get_engagement_ids_by_status`.
+  The function walks `DataKey::AllEngagements` in creation order and loads
+  each record until it has filled the requested page. Late pages therefore
+  cost more, and a sparse public set means scanning many private records.
+  Engagements missing from that index, and index entries whose record has
+  expired, are skipped.
 
 #### Amendment Queries
 
@@ -1865,6 +1938,8 @@ cd contracts/hiresettle && cargo test
 
 Tests cover creation, proof submission, confirmation, disputes, arbiter voting, replacement flow, early exit, amendments, batch confirmations, auto-confirm, expiry, admin configuration, and edge cases for all validation rules.
 
+See [TESTING.md](TESTING.md) for how `test.rs` is organised, its shared helpers, and how to run a single test or a group of tests (`cargo test <name> -- --exact`).
+
 ---
 
 ## Usage Example
@@ -1919,12 +1994,109 @@ stellar contract invoke \
 
 ---
 
+## Numeric Precision
+
+All money math in the contract uses integers. There are no floats and no fixed-point library. Knowing the three unit systems below and the one rounding rule tells you, to the unit, what every party is paid.
+
+### Units
+
+| Quantity | Type | Unit | Range / cap |
+|---|---|---|---|
+| Token amounts (`total_amount`, `released_amount`, fees, payouts, bonds, min amounts) | `i128` | Raw base units of the engagement's token | `total_amount > 0` and `>=` the effective min amount |
+| `Milestone.payment_percent` | `u32` | Whole percent, divisor `100` | All milestones must sum to exactly `100` |
+| Split-vote `split_percent` / settled split | `u32` | Whole percent, divisor `100` | `0..=100` |
+| Platform fee `PlatformFee.bps` | `u32` | Basis points, divisor `10_000` | `<= 500` (5%) — `FeeTooHigh` |
+| Fee tier `FeeTier.bps` | `u32` | Basis points | `<=` current base platform fee |
+| Referral discount | `u32` | Basis points, subtracted from the fee rate | `<= 500` |
+| Arbiter fee | `u32` | Basis points | `<= 200` (2%) — `ArbiterFeeTooHigh` |
+| Fee rebate (`set_fee_rebate_bps`) | `u32` | Basis points of each collected platform fee | `<= 500` — `FeeTooHigh` |
+| `recruiter_split_bps` | `u32` | Basis points kept by the primary recruiter | `<= 10_000` — `InvalidSplitBps` |
+| Bond forfeit (`set_bond_forfeit_bps`) | `u32` | Basis points | `<= 10_000` — `InvalidBondForfeitBps` |
+
+A milestone percentage and a basis-point rate are **different scales**. `payment_percent: 30` means 30%, and `platform_fee_bps: 30` means 0.30%. Milestone percentages are whole numbers, so a 33.33% milestone can't be expressed. Use something like `33 / 33 / 34`.
+
+### Token decimals
+
+The contract never calls a token's `decimals()`. `1_000_000_000` means 100 USDC for a 7-decimal Stellar asset and 0.000000001 of an 18-decimal token. Every percentage and bps result is the same *fraction* on any token, but absolute thresholds are not: `set_min_amount` and fee-tier `threshold`s are compared against raw units. Prefer per-token minimums (`set_token_min_amount`). Only allowlist tokens of comparable precision if you rely on tiers. All examples in this README use 7-decimal USDC, where `1 USDC = 10_000_000` units. (Tests: `test_engagement_payout_math_is_decimal_agnostic_for_18_decimal_token`, `test_min_amount_is_raw_units_not_scaled_per_token_decimals`.)
+
+### Order of operations
+
+For a single milestone payout:
+
+```text
+gross        = total_amount × payment_percent ÷ 100            (minus any replacement_paid_out)
+platform_fee = gross × effective_platform_bps ÷ 10_000
+after_fee    = gross − platform_fee
+arbiter_fee  = after_fee × arbiter_fee_bps ÷ 10_000             (approved disputes only)
+net          = after_fee − arbiter_fee
+primary      = net × recruiter_split_bps ÷ 10_000               (only when a co-recruiter is set)
+co_recruiter = net − primary
+```
+
+The platform fee is then split further: `credit = (platform_fee − rebate_offset) × fee_rebate_bps ÷ 10_000` goes to the company's rebate balance and the rest goes to the treasury. For a split-vote dispute, `gross` is first scaled by `settled_percent ÷ 100` and the unreleased part is withheld for the company. For a streamed payout, `net` vests as `net × min(elapsed, duration) ÷ duration`.
+
+The arbiter fee is taken from the amount **after** the platform fee, not from `gross`, so the two rates compound rather than add: 250 bps + 200 bps removes 4.45%, not 4.50%.
+
+### Rounding rule
+
+Every `÷` above is Rust integer division on non-negative `i128`, which **rounds down**. Wherever the contract computes a remainder by subtraction (`gross − fee`, `net − primary`, `fee − credit`), the party on the subtracted side receives the rounding dust. So:
+
+| Division | Rounded down | Receives the dust |
+|---|---|---|
+| Platform / arbiter fee | Treasury / arbiter | Recruiter(s) |
+| Co-recruiter split | Primary recruiter | Co-recruiter |
+| Fee rebate credit | Company rebate | Treasury |
+| Streamed vesting | Early claims | Final claim (`vested == total` exactly once `elapsed >= duration`) |
+| Milestone share `total × pct ÷ 100` | Every milestone | **Nobody** — see below |
+
+Worked example: 1,000 USDC engagement (`10_000_000_000` units), 30% milestone, 250 bps fee, 60/40 co-recruiter split:
+
+```text
+gross        = 10_000_000_000 × 30 ÷ 100      = 3_000_000_000
+platform_fee = 3_000_000_000 × 250 ÷ 10_000   =    75_000_000   → treasury
+net          = 3_000_000_000 − 75_000_000     = 2_925_000_000
+primary      = 2_925_000_000 × 6_000 ÷ 10_000 = 1_755_000_000   → recruiter
+co_recruiter = 2_925_000_000 − 1_755_000_000  = 1_170_000_000   → co-recruiter
+```
+
+Rounding examples:
+
+- **A fee rounds to zero on tiny payouts.** A fee is only charged once `gross × bps >= 10_000`. At 250 bps a gross share of `399` units gives `399 × 250 ÷ 10_000 = 9` (not 9.975), and anything under `40` units pays no fee and emits no `platform_fee_collected` event.
+- **The split remainder goes to the co-recruiter.** With a net of `1_001` and `recruiter_split_bps = 3_333`, the primary gets `333` and the co-recruiter gets `668`. (Test: `test_co_recruiter_split_with_odd_percentage_remainder`.)
+
+### Milestone-share dust stays in escrow
+
+Each milestone's share is rounded down on its own. The shares therefore add up to exactly `total_amount` only when `total_amount × payment_percent` is divisible by 100 for every milestone. For example, `total_amount = 1_000_000_007` with a `30 / 40 / 30` schedule pays `300_000_002 + 400_000_002 + 300_000_002 = 1_000_000_006`, which leaves **1 unit** behind. `released_amount` never reaches `total_amount`, so `get_escrow_balance` reports `1` after the engagement is `Completed`. No function refunds or sweeps it: `cancel_engagement` requires an `Active` or `ReplacementRequested` engagement, and `expire_engagement` refuses a `Completed` one. The loss is at most `milestone_count − 1` units (well under one cent for 7-decimal tokens), but it is real.
+
+**To avoid it, make `total_amount` a multiple of 100.** Every whole-percent share is then exact.
+
+### Which fee reductions apply on each payout path
+
+The payout paths don't compute the effective platform-fee rate the same way. This table describes the code as it currently behaves:
+
+| Payout path | Fee waiver | Fee tiers | Referral discount | Arbiter fee |
+|---|---|---|---|---|
+| `confirm_milestone` | ✓ | ✓ | ✓ | — |
+| `batch_confirm_milestones` | ✓ | ✓ | ✗ | — |
+| `force_confirm_milestone` | ✓ | ✓ | ✗ | — |
+| `cast_arbiter_vote` (approve) / `cast_arbiter_split_vote` | ✓ | ✗ | ✓ | ✓ |
+| `super_arbiter_resolve` (approve) | ✓ | ✓ | ✓ | ✓ |
+| `resolve_escalation_timeout` | ✓ | ✓ | ✓ | — |
+
+The ✗ cells are gaps, not documented intent. For example, a referred engagement pays the full tiered rate if its milestones are confirmed through `batch_confirm_milestones`, but the discounted rate through `confirm_milestone`. Integrators who quote fees up front should assume the higher of the two until these paths are unified.
+
+### Overflow
+
+Every intermediate product is at most `total_amount × 10_000`, so any `total_amount` below about `1.7 × 10³⁴` units is safe in `i128`. The contract uses plain operators, not `checked_*`. The workspace release profile sets `overflow-checks = true`, so an overflow aborts the transaction and never wraps silently. Counters and ledger arithmetic use `saturating_*` where they could overflow (`page × page_size`, TTL expiry ledgers).
+
+---
+
 ## Security Considerations
 
 - **Authorization**: Every state-changing function calls `require_auth()`. Recruiters cannot confirm their own milestones. Companies cannot cast arbiter votes.
 - **No party/arbiter address overlap**: `create_engagement` rejects `company == recruiter`, `company` appearing in the arbiter set, or `recruiter` appearing in the arbiter set. Without this check a company could name itself (or a colluding address) as arbiter and vote on its own disputes, or name itself as recruiter to self-confirm milestones.
 - **Multi-arbiter quorum**: Disputes require M-of-N arbiter votes to resolve. A single arbiter cannot unilaterally release or withhold payment — both approval and rejection require a configurable quorum. Duplicate votes from the same arbiter are rejected on-chain.
-- **Token amounts are raw integer units, not decimal-aware**: The token allowlist accepts any allowlisted SAC, not just USDC. `total_amount`, `MinEngagementAmount`, and all milestone payout math (`amount * payment_percent / 100`) operate on raw integer units of whichever token is used — the contract never reads a token's `decimals()`. Percentage splits are exact regardless of precision, but a single admin-wide minimum amount (`set_min_amount`) will represent a different real-world value across tokens of different precision (e.g. 7-decimal vs. 18-decimal tokens). Integrators are responsible for only allowlisting tokens of comparable precision, or adjusting the minimum accordingly, when using a token other than the reference 7-decimal USDC used throughout this README's examples.
+- **Token amounts are raw integer units, not decimal-aware**: The token allowlist accepts any allowlisted SAC, not just USDC. `total_amount`, `MinEngagementAmount`, and all milestone payout math (`amount * payment_percent / 100`) operate on raw integer units of whichever token is used — the contract never reads a token's `decimals()`. Percentage splits are exact regardless of precision, but a single admin-wide minimum amount (`set_min_amount`) will represent a different real-world value across tokens of different precision (e.g. 7-decimal vs. 18-decimal tokens). Integrators are responsible for only allowlisting tokens of comparable precision, or adjusting the minimum accordingly, when using a token other than the reference 7-decimal USDC used throughout this README's examples. See [Numeric Precision](#numeric-precision).
 - **Arbiter fee cap**: The arbiter fee is capped at 200 bps (2%) to prevent excessive deduction from recruiter payouts on dispute approval.
 - **Retention double-check**: `confirm_milestone()` re-verifies `valid_after_ledger` even if `unlock_milestone()` was called, preventing a company from confirming a retention milestone before the window truly ends.
 - **Replacement fee fairness**: The Placement tranche paid to the recruiter is non-refundable. Only unreleased amounts are frozen. This is explicit in the contract and documented clearly so both parties understand the terms at engagement creation.
