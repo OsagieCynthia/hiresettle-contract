@@ -93,6 +93,10 @@ impl HireSettleContract {
             &reason.clone(),
         );
 
+        // Issue #501: durable record for the engagement timeline;
+        // `DisputeReason` above is cleared once the dispute resolves.
+        Self::record_dispute_raised(&env, &engagement_id, milestone_index, &company, &reason);
+
         // Issue #468: every panel member is now on the hook for a vote.
         Self::record_arbiter_assignments(&env, &engagement.arbiters);
 
@@ -228,7 +232,13 @@ impl HireSettleContract {
                 payment,
                 &arbiter,
             );
-            Self::finish_dispute_resolved(&env, &mut engagement, &engagement_id, milestone_index);
+            Self::finish_dispute_resolved(
+                &env,
+                &mut engagement,
+                &engagement_id,
+                milestone_index,
+                &caller,
+            );
         } else if record.reject_weight > total_weight - quorum {
             let mut milestone = milestone;
             let old_status = milestone.status.clone();
@@ -347,11 +357,13 @@ impl HireSettleContract {
         engagement: &mut Engagement,
         engagement_id: &String,
         milestone_index: u32,
+        actor: &Address,
     ) {
         let mut milestone = engagement.milestones.get(milestone_index).unwrap();
         let old_status = milestone.status.clone();
         milestone.status = MilestoneStatus::Resolved;
         engagement.milestones.set(milestone_index, milestone);
+        Self::bond_clear_rejection(env, engagement_id, milestone_index);
 
         let all_done = (0..engagement.milestones.len()).all(|i| {
             let s = engagement.milestones.get(i).unwrap().status;
@@ -360,6 +372,7 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::settle_bonds(env, engagement);
             Self::decrement_company_active_count(env, &engagement.company);
             Self::refund_split_withheld(env, engagement_id, engagement);
         }
@@ -404,6 +417,7 @@ impl HireSettleContract {
             engagement_id,
             old_engagement_status,
             engagement.status.clone(),
+            Some(actor.clone()),
         );
     }
 
@@ -583,7 +597,13 @@ impl HireSettleContract {
                 ),
                 (milestone_index, settled, released, withheld),
             );
-            Self::finish_dispute_resolved(&env, &mut engagement, &engagement_id, milestone_index);
+            Self::finish_dispute_resolved(
+                &env,
+                &mut engagement,
+                &engagement_id,
+                milestone_index,
+                &caller,
+            );
         } else {
             env.storage().persistent().set(&split_key, &record);
             env.storage()
@@ -937,8 +957,12 @@ impl HireSettleContract {
             let effective_bps = if Self::is_fee_waived_internal(&env, &engagement_id) {
                 0
             } else {
-                let tiered_bps =
-                    Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+                let tiered_bps = Self::engagement_tier_bps(
+                    &env,
+                    &engagement_id,
+                    platform_fee.bps,
+                    engagement.total_amount,
+                );
                 Self::apply_referral_discount(&env, tiered_bps, &engagement.referrer)
             };
             let platform_fee_amount = (payment * effective_bps as i128) / 10_000;
@@ -983,6 +1007,7 @@ impl HireSettleContract {
             let old_engagement_status = engagement.status.clone();
             if all_done {
                 engagement.status = EngagementStatus::Completed;
+                Self::settle_bonds(&env, &engagement);
                 Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
                 Self::decrement_company_active_count(&env, &engagement.company);
                 Self::refund_split_withheld(&env, &engagement_id, &mut engagement);
@@ -1023,6 +1048,7 @@ impl HireSettleContract {
                 &engagement_id,
                 old_engagement_status,
                 engagement.status.clone(),
+                Some(super_arbiter.clone()),
             );
         } else {
             let old_status = milestone.status.clone();
@@ -1172,8 +1198,12 @@ impl HireSettleContract {
         let effective_bps = if Self::is_fee_waived_internal(&env, &engagement_id) {
             0
         } else {
-            let tiered_bps =
-                Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+            let tiered_bps = Self::engagement_tier_bps(
+                &env,
+                &engagement_id,
+                platform_fee.bps,
+                engagement.total_amount,
+            );
             Self::apply_referral_discount(&env, tiered_bps, &engagement.referrer)
         };
         let platform_fee_amount = (payment * effective_bps as i128) / 10_000;
@@ -1203,6 +1233,7 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::settle_bonds(&env, &engagement);
             Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
             Self::decrement_company_active_count(&env, &engagement.company);
             Self::refund_split_withheld(&env, &engagement_id, &mut engagement);
@@ -1243,6 +1274,7 @@ impl HireSettleContract {
             &engagement_id,
             old_engagement_status,
             engagement.status.clone(),
+            None,
         );
 
         engagement.last_activity_ledger = env.ledger().sequence();
@@ -1609,6 +1641,7 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::settle_bonds(&env, &engagement);
             Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
             Self::decrement_company_active_count(&env, &engagement.company);
             Self::refund_split_withheld(&env, &engagement_id, &mut engagement);
@@ -1624,6 +1657,7 @@ impl HireSettleContract {
             &engagement_id,
             old_engagement_status,
             engagement.status.clone(),
+            Some(caller.clone()),
         );
 
         Self::emit_milestone_status_changed(

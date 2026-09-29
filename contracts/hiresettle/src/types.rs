@@ -1,7 +1,7 @@
 //! Contract data structs (`#[contracttype]`).
 
 use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
-use crate::{EngagementStatus, MilestoneKind, MilestoneStatus};
+use crate::{EngagementStatus, MilestoneKind, MilestoneStatus, TimelineKind};
 
 /// A payment and workflow checkpoint belonging to an [`Engagement`]'s `milestones`.
 #[contracttype]
@@ -308,6 +308,16 @@ pub struct EngagementConfig {
     /// company's pooled balance instead of a fresh token transfer
     /// (issue #472). Default `false` preserves existing behaviour.
     pub fund_from_pool: bool,
+    /// When `true`, the platform-fee tier is resolved once at creation and
+    /// reused for every later payout on this engagement, so admin changes to
+    /// `set_fee_tiers` no longer affect it (issue #505). Referral discounts
+    /// and fee waivers still apply on top at payout time. Default `false`
+    /// re-resolves the tier against the live list on every payout.
+    pub snapshot_fee_tier: bool,
+    /// Optional co-recruiter collateral bond, escrowed from `co_recruiter` at
+    /// creation (issue #506). Ignored when `co_recruiter` is `None`. See
+    /// `get_co_recruiter_bond` for the forfeiture rule.
+    pub co_recruiter_bond_amount: Option<i128>,
 }
 /// Vesting record for a streamed milestone payout (issue #466), stored under
 /// `DataKey::StreamedPayout(engagement_id, milestone_index)`.
@@ -462,4 +472,59 @@ pub struct EmergencySignerConfig {
 pub struct EmergencyVoteTally {
     pub voters: Vec<Address>,
     pub started_at_ledger: u32,
+}
+/// Returned by `get_replacement_record` (issue #501).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplacementRecord {
+    /// Company address that called `request_replacement`.
+    pub requested_by: Address,
+    /// Ledger at which the replacement was requested.
+    pub ledger: u32,
+}
+/// One entry of `get_dispute_history` (issue #501).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisputeHistoryEntry {
+    /// Milestone the dispute was raised on.
+    pub milestone_index: u32,
+    /// Address that called `raise_dispute` (the company or its co-signer).
+    pub raised_by: Address,
+    /// Reason supplied with the dispute.
+    pub reason: String,
+    /// Ledger at which the dispute was raised.
+    pub ledger: u32,
+}
+/// One entry of `get_status_history` (issue #501).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StatusChangeEntry {
+    /// Status before the transition.
+    pub old_status: EngagementStatus,
+    /// Status after the transition.
+    pub new_status: EngagementStatus,
+    /// Address whose call caused the transition; `None` for permissionless
+    /// calls such as `expire_engagement`.
+    pub actor: Option<Address>,
+    /// Ledger at which the transition happened.
+    pub ledger: u32,
+}
+/// One entry of `get_engagement_timeline` (issue #501), assembled at read
+/// time from the per-kind history that `kind` names.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimelineEntry {
+    /// Which underlying history this entry comes from.
+    pub kind: TimelineKind,
+    /// Milestone the event concerns, when it concerns a single milestone.
+    pub milestone_index: Option<u32>,
+    /// Address that performed the action; `None` for permissionless calls.
+    pub actor: Option<Address>,
+    /// Ledger at which the event happened.
+    pub ledger: u32,
+    /// Position of the event in its own history, for fetching full detail:
+    /// the index into `get_split_amendment_log`, `get_dispute_history` or
+    /// `get_status_history`, or the `replacement_index` for
+    /// `get_replacement_reason` / `get_replacement_record`.
+    pub source_index: u32,
 }
