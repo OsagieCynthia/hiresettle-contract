@@ -149,6 +149,9 @@ pub enum ConfigKey {
     FeeRebateBps,
     /// Emergency pause vote window in ledgers (issue #474).
     EmergencyVoteWindow,
+    /// Grace period in ledgers before the same proposer may re-propose on the
+    /// same milestone after a rejection (issue #496, default 0 for no cooldown).
+    AmendmentReproposalCooldown,
 }
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.
