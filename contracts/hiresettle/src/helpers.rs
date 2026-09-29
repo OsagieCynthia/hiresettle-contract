@@ -124,6 +124,23 @@ impl HireSettleContract {
         base_bps
     }
 
+    /// Tier-resolved platform-fee bps for one engagement: the rate
+    /// snapshotted at creation if the engagement opted into
+    /// `snapshot_fee_tier` (issue #505), else `resolve_platform_fee_bps`
+    /// against the live tiers. Waivers and referral discounts are applied by
+    /// the caller on top of this.
+    pub(crate) fn engagement_tier_bps(
+        env: &Env,
+        engagement_id: &String,
+        base_bps: u32,
+        total_amount: i128,
+    ) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::FeeTierSnapshot(engagement_id.clone()))
+            .unwrap_or_else(|| Self::resolve_platform_fee_bps(env, base_bps, total_amount))
+    }
+
     /// Whether the admin has waived the platform fee for this engagement
     /// (issue #335).
     pub(crate) fn is_fee_waived_internal(env: &Env, engagement_id: &String) -> bool {
@@ -135,7 +152,7 @@ impl HireSettleContract {
 
     /// Resolve the effective platform-fee bps for a milestone payout,
     /// collapsing to 0 when the engagement has an active fee waiver
-    /// (issue #335). Otherwise defers to `resolve_platform_fee_bps`.
+    /// (issue #335). Otherwise defers to `engagement_tier_bps`.
     pub(crate) fn effective_platform_fee_bps(
         env: &Env,
         engagement_id: &String,
@@ -145,7 +162,7 @@ impl HireSettleContract {
         if Self::is_fee_waived_internal(env, engagement_id) {
             return 0;
         }
-        Self::resolve_platform_fee_bps(env, base_bps, total_amount)
+        Self::engagement_tier_bps(env, engagement_id, base_bps, total_amount)
     }
 
 

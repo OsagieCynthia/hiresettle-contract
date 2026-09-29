@@ -358,6 +358,12 @@ impl HireSettleContract {
         if let Some(bond_amount) = config.recruiter_bond_amount {
             Self::escrow_recruiter_bond(&env, &engagement_id, &recruiter, &token, bond_amount);
         }
+        // Issue #506: the co-recruiter's bond, only when there is a co-recruiter.
+        if let (Some(co_recruiter), Some(bond_amount)) =
+            (&config.co_recruiter, config.co_recruiter_bond_amount)
+        {
+            Self::escrow_co_recruiter_bond(&env, &engagement_id, co_recruiter, &token, bond_amount);
+        }
 
         let engagement = Engagement {
             id: engagement_id.clone(),
@@ -389,6 +395,18 @@ impl HireSettleContract {
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
 
         Self::extend_engagement_ttl(&env, &engagement_id);
+
+        // Issue #505: freeze the tier-resolved rate (or the base rate when no
+        // tier matches) so later `set_fee_tiers` calls cannot change it.
+        if config.snapshot_fee_tier {
+            let base_bps = Self::get_platform_fee_internal(&env).bps;
+            let bps = Self::resolve_platform_fee_bps(&env, base_bps, total_amount);
+            let key = DataKey2::FeeTierSnapshot(engagement_id.clone());
+            env.storage().persistent().set(&key, &bps);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, 100_000, 6_300_000);
+        }
 
         // Increment per-company active engagement count.
         let new_active = active_count + 1;
@@ -667,6 +685,8 @@ impl HireSettleContract {
             &DataKey::ReplacementCount(engagement_id.clone()),
             &(replacement_index + 1),
         );
+        // Issue #501: who asked and when, for the engagement timeline.
+        Self::record_replacement(&env, &engagement_id, replacement_index, &company);
 
         Self::extend_engagement_ttl(&env, &engagement_id);
         Self::emit_engagement_status_changed(
@@ -674,6 +694,7 @@ impl HireSettleContract {
             &engagement_id,
             old_engagement_status,
             engagement.status.clone(),
+            Some(company.clone()),
         );
 
         env.events().publish(
@@ -822,10 +843,11 @@ impl HireSettleContract {
             &engagement_id,
             old_engagement_status,
             engagement.status.clone(),
+            Some(company.clone()),
         );
 
         Self::decrement_company_active_count(&env, &engagement.company);
-        Self::settle_recruiter_bond(&env, &engagement);
+        Self::settle_bonds(&env, &engagement);
 
         env.events().publish(
             (
