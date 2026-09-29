@@ -65,6 +65,230 @@ Because Soroban runs contracts inside the Stellar WASM VM, the contract must com
 cargo test
 ```
 
+---
+
+## Getting Started: One Engagement End-to-End
+
+This walkthrough takes a single engagement from deployment to completion on Stellar **testnet**. A company escrows 100 XLM for a hire, the recruiter proves a placement and gets paid half, and after a one-day retention window, the recruiter gets paid the rest. Finally, the company rates the recruiter.
+
+It uses four roles, each with its own key:
+
+| Role | Does |
+|---|---|
+| `admin` | Deploys and initialises the contract |
+| `company` | Funds escrow, confirms milestones, rates the recruiter |
+| `recruiter` | Submits proof for each milestone and receives payouts |
+| `arbiter` | Named on the engagement; only acts if a dispute is raised |
+
+> **Want to see the whole flow in seconds instead of a day?** The same lifecycle, with three milestones and simulated ledger time, runs as a unit test:
+> `cd contracts/hiresettle && cargo test test_full_engagement_lifecycle -- --nocapture`
+> (see `test_full_engagement_lifecycle` in [`src/test.rs`](contracts/hiresettle/src/test.rs)).
+
+### Step 0 — Build the WASM
+
+Complete [Setup & Installation](#setup--installation) first, then build the optimized artifact from `contracts/hiresettle`:
+
+```bash
+cd contracts/hiresettle
+make optimize
+```
+
+### Step 1 — Create and fund the accounts
+
+```bash
+for who in admin company recruiter arbiter; do
+  stellar keys generate "$who" --network testnet --fund
+done
+
+ADMIN=$(stellar keys address admin)
+COMPANY=$(stellar keys address company)
+RECRUITER=$(stellar keys address recruiter)
+ARBITER=$(stellar keys address arbiter)
+```
+
+Friendbot gives each account 10,000 XLM, which is plenty for the escrow and fees.
+
+### Step 2 — Deploy and initialise the contract
+
+```bash
+CONTRACT=$(stellar contract deploy \
+  --wasm target/wasm32v1-none/release/hiresettle.optimized.wasm \
+  --source admin --network testnet)
+
+stellar contract invoke --id "$CONTRACT" --source admin --network testnet \
+  -- init --admin "$ADMIN"
+```
+
+`init` sets the platform fee to 0 bps (treasury = admin) and the minimum engagement amount to `100_000` raw units. The token allowlist is off by default, so any token is accepted.
+
+### Step 3 — Pick the escrow token
+
+This walkthrough uses native XLM through its Stellar Asset Contract (7 decimals, so `1 XLM = 10_000_000`). To use testnet USDC instead, see [Create a test engagement via CLI](#create-a-test-engagement-via-cli).
+
+```bash
+TOKEN=$(stellar contract id asset --asset native --network testnet)
+```
+
+### Step 4 — Company creates the engagement and funds escrow
+
+The engagement has two milestones that must sum to 100%:
+
+| Index | Name | Kind | Pays | Becomes provable |
+|---|---|---|---|---|
+| 0 | `Candidate Placed` | `Placement` | 50% | Immediately (starts `Pending`) |
+| 1 | `1-Day Retention` | `Retention` | 50% | After 1 day (starts `Locked`) |
+
+`retention_days` holds one entry per `Retention` milestone, in order. The contract computes each retention unlock ledger as `current_ledger + days × 17_280`. For milestone 1, `prerequisites: [0]` means it cannot be confirmed before milestone 0.
+
+```bash
+stellar contract invoke --id "$CONTRACT" --source company --network testnet \
+  -- create_engagement \
+  --engagement_id "ENG-DEMO-001" \
+  --company "$COMPANY" \
+  --recruiter "$RECRUITER" \
+  --arbiter_setup "{\"arbiters\":[\"$ARBITER\"],\"quorum\":1,\"weights\":null}" \
+  --token "$TOKEN" \
+  --total_amount 1000000000 \
+  --job_title "Senior Engineer" \
+  --milestones '[
+    {"name":"Candidate Placed","payment_percent":50,"kind":"Placement",
+     "valid_after_ledger":0,"proof_hash":"","status":"Pending",
+     "proof_submitted_at":0,"replacement_paid_out":"0","prerequisites":[]},
+    {"name":"1-Day Retention","payment_percent":50,"kind":"Retention",
+     "valid_after_ledger":0,"proof_hash":"","status":"Locked",
+     "proof_submitted_at":0,"replacement_paid_out":"0","prerequisites":[0]}
+  ]' \
+  --retention_days '[1]' \
+  --config '{"metadata_hash":null,"co_recruiter":null,"recruiter_split_bps":10000,
+    "contract_pdf_hash":null,"referrer":null,"tags":null,"is_public":false,
+    "stream_duration_ledgers":null,"recruiter_bond_amount":null,
+    "bundle_id":null,"fund_from_pool":false}'
+```
+
+This call transfers 100 XLM from the company to the contract. The contract sets each milestone's `valid_after_ledger` and `status` itself, so pass `0`, `""` and the starting status shown in the command. `recruiter_split_bps: 10000` sends the whole payout to the recruiter because there is no co-recruiter.
+
+Check the result:
+
+```bash
+stellar contract invoke --id "$CONTRACT" --network testnet --source admin \
+  -- get_engagement_summary --engagement_id "ENG-DEMO-001"     # status: Active, released_amount: 0
+
+stellar contract invoke --id "$CONTRACT" --network testnet --source admin \
+  -- get_all_milestone_statuses --engagement_id "ENG-DEMO-001" # ["Pending","Locked"]
+```
+
+### Step 5 — Recruiter submits placement proof
+
+A proof is any non-empty string of up to 200 characters, usually an IPFS CID or URI pointing to the evidence (e.g. a signed offer letter). A proof hash cannot be reused on another milestone in the same engagement.
+
+```bash
+stellar contract invoke --id "$CONTRACT" --source recruiter --network testnet \
+  -- submit_proof \
+  --recruiter "$RECRUITER" \
+  --engagement_id "ENG-DEMO-001" \
+  --milestone_index 0 \
+  --proof_hash "ipfs://QmOfferLetterDemo"
+```
+
+Milestone 0 moves to `ProofSubmitted`.
+
+### Step 6 — Company confirms, and the first payment is released
+
+```bash
+stellar contract invoke --id "$CONTRACT" --source company --network testnet \
+  -- confirm_milestone \
+  --company "$COMPANY" \
+  --engagement_id "ENG-DEMO-001" \
+  --milestone_index 0
+```
+
+The contract pays `1_000_000_000 × 50 / 100 = 500_000_000` (50 XLM) to the recruiter, minus the [platform fee](#platformfee) (0 here). Milestone 0 is now `Confirmed`, and `get_escrow_balance` returns `500000000`.
+
+If the company does not respond within the confirm window (~5 days), anyone can call [`force_confirm_milestone`](#force_confirm_milestone--confirm-window-timeout-override) to pay the recruiter. If the company disagrees with the proof, it calls `raise_dispute` instead, and the arbiter votes (see [Dispute Resolution Flow](#milestone-state-machine)).
+
+### Step 7 — Wait out the retention window, then unlock
+
+Milestone 1 stays `Locked` until its unlock ledger (~17,280 ledgers, about one day). Check how long is left:
+
+```bash
+stellar contract invoke --id "$CONTRACT" --network testnet --source admin \
+  -- ledgers_until_unlock --engagement_id "ENG-DEMO-001" --milestone_index 1
+```
+
+When this returns `0`, anyone can unlock it. `unlock_milestone` is permissionless, so a keeper bot usually runs it:
+
+```bash
+stellar contract invoke --id "$CONTRACT" --source admin --network testnet \
+  -- unlock_milestone --engagement_id "ENG-DEMO-001" --milestone_index 1
+```
+
+Milestone 1 moves from `Locked` to `Pending`.
+
+### Step 8 — Retention proof and final confirmation
+
+```bash
+stellar contract invoke --id "$CONTRACT" --source recruiter --network testnet \
+  -- submit_proof \
+  --recruiter "$RECRUITER" \
+  --engagement_id "ENG-DEMO-001" \
+  --milestone_index 1 \
+  --proof_hash "ipfs://QmRetentionPayrollDemo"
+
+stellar contract invoke --id "$CONTRACT" --source company --network testnet \
+  -- confirm_milestone \
+  --company "$COMPANY" \
+  --engagement_id "ENG-DEMO-001" \
+  --milestone_index 1
+```
+
+This releases the remaining 50 XLM. All milestones are now `Confirmed`, so the engagement becomes `Completed` and emits `engagement_completed`.
+
+### Step 9 — Rate the recruiter and verify
+
+A company can rate the recruiter once per completed engagement, from 1 to 5 stars:
+
+```bash
+stellar contract invoke --id "$CONTRACT" --source company --network testnet \
+  -- rate_recruiter --company "$COMPANY" --engagement_id "ENG-DEMO-001" --stars 5
+```
+
+Verify the final state:
+
+```bash
+stellar contract invoke --id "$CONTRACT" --network testnet --source admin \
+  -- get_engagement_summary --engagement_id "ENG-DEMO-001"   # status: Completed, released_amount: 1000000000
+
+stellar contract invoke --id "$CONTRACT" --network testnet --source admin \
+  -- get_escrow_balance --engagement_id "ENG-DEMO-001"       # 0
+
+stellar contract invoke --id "$CONTRACT" --network testnet --source admin \
+  -- get_recruiter_rating --recruiter "$RECRUITER"           # {"rating_count":1,"total_stars":5}
+
+stellar contract invoke --id "$TOKEN" --network testnet --source admin \
+  -- balance --id "$RECRUITER"
+```
+
+The recruiter's XLM balance is about 100 XLM above its starting 10,000 XLM. It is slightly less than that because the recruiter paid transaction fees for its two `submit_proof` calls.
+
+### What you just did
+
+```
+create_engagement ─► submit_proof(0) ─► confirm_milestone(0) ─► [~1 day] ─► unlock_milestone(1)
+   (escrow 100)        Pending→Proof      50 XLM → recruiter                  Locked→Pending
+                                                                                   │
+rate_recruiter ◄── Completed ◄── confirm_milestone(1) ◄── submit_proof(1) ◄───────┘
+                                   50 XLM → recruiter
+```
+
+### Where to go next
+
+- **Things went wrong?** Look up `raise_dispute` / `cast_arbiter_vote`, `request_replacement`, `request_early_exit`, `cancel_engagement` and `expire_engagement` in [Which write function do I call?](#which-write-function-do-i-call).
+- **Splitting a fee between two recruiters?** Set `co_recruiter` and `recruiter_split_bps` in the config (see [Key Features](#key-features)).
+- **A call panicked?** Find the message in [Errors](#errors).
+- **Building an indexer or UI?** See [Events](#events) and [Which query do I call?](#which-query-do-i-call).
+
+---
+
 ## Overview
 
 ### Module Architecture
