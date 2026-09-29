@@ -131,6 +131,9 @@ pub enum ConfigKey {
     FeeRebateBps,
     /// Emergency pause vote window in ledgers (issue #474).
     EmergencyVoteWindow,
+    /// Grace period in ledgers before the same proposer may re-propose on the
+    /// same milestone after a rejection (issue #496, default 0 for no cooldown).
+    AmendmentReproposalCooldown,
 }
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.
@@ -336,5 +339,8 @@ pub enum DataKey2 {
     EmergencyVotes(String),
     /// Per-company, per-token redeemable fee rebate balance (issue #475).
     CompanyRebate(Address, Address),
+    /// Last ledger at which a proposer's amendment was rejected on an engagement
+    /// (issue #496). Used to enforce the reproposal cooldown.
+    SplitAmendmentRejectedAt(String, Address),
 }
 

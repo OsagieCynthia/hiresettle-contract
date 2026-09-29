@@ -903,6 +903,7 @@ impl HireSettleContract {
     /// - `"no co_recruiter"` — engagement has no co-recruiter
     /// - `"InvalidSplitBps"` — `new_split_bps > 10_000`
     /// - `"unauthorized"` — caller is neither recruiter nor co-recruiter
+    /// - `"AmendmentCooldownActive"` — proposer is in cooldown after a recent rejection (issue #496)
     pub fn propose_split_amendment(
         env: Env,
         proposer: Address,
@@ -933,6 +934,18 @@ impl HireSettleContract {
         } else {
             panic!("{}", ERR_UNAUTHORIZED);
         };
+
+        // Issue #496: Check amendment reproposal cooldown
+        let cooldown = Self::get_amendment_reprop_cooldown(env.clone());
+        if cooldown > 0 {
+            let rejection_key = DataKey2::SplitAmendmentRejectedAt(engagement_id.clone(), proposer.clone());
+            if let Some(rejected_at) = env.storage().persistent().get::<_, u32>(&rejection_key) {
+                let current_ledger = env.ledger().sequence();
+                if current_ledger < rejected_at.saturating_add(cooldown) {
+                    panic!("AmendmentCooldownActive");
+                }
+            }
+        }
 
         let ttl = Self::get_amendment_ttl(env.clone());
         let now = env.ledger().sequence();
@@ -1018,6 +1031,7 @@ impl HireSettleContract {
     }
 
     /// Counterparty rejects a pending split amendment without changing the split.
+    /// Records the rejection time for cooldown tracking (issue #496).
     pub fn reject_split_amendment(env: Env, rejector: Address, engagement_id: String) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
@@ -1038,6 +1052,15 @@ impl HireSettleContract {
 
         Self::assert_split_amendment_counterparty(&engagement, &rejector, &proposal);
         env.storage().persistent().remove(&key);
+
+        // Issue #496: Record the rejection ledger for the proposer on this engagement
+        let rejection_key = DataKey2::SplitAmendmentRejectedAt(engagement_id.clone(), proposal.proposer.clone());
+        env.storage()
+            .persistent()
+            .set(&rejection_key, &env.ledger().sequence());
+        env.storage()
+            .persistent()
+            .extend_ttl(&rejection_key, 100_000, 6_300_000);
 
         env.events().publish(
             (

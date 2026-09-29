@@ -1102,6 +1102,30 @@ impl HireSettleContract {
     }
 
     // ----------------------------------------------------------
+    // ISSUE #496 — AMENDMENT REPROPOSAL COOLDOWN
+    // ----------------------------------------------------------
+
+    /// Admin sets the grace period in ledgers before a proposer may re-propose
+    /// an amendment on the same engagement after rejection (issue #496).
+    /// Default 0 means no cooldown (immediate re-proposal allowed).
+    pub fn set_amendment_reprop_cooldown(env: Env, admin: Address, ledgers: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::Config(ConfigKey::AmendmentReproposalCooldown), &ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "amendment_reprop_cooldown_set"),), ledgers);
+    }
+
+    /// Return the amendment reproposal cooldown in ledgers (default 0, no cooldown).
+    pub fn get_amendment_reprop_cooldown(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::AmendmentReproposalCooldown))
+            .unwrap_or(0)
+    }
+
+    // ----------------------------------------------------------
     // ISSUE #476 — RECRUITER VERIFICATION BADGE
     // ----------------------------------------------------------
 
