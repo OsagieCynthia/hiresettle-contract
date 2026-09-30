@@ -86,6 +86,66 @@ impl HireSettleContract {
     ///
     /// Callers are responsible for `assert_not_paused` and
     /// `company.require_auth()` before invoking this.
+    /// Recruiter sets their own active engagement cap (issue #482).
+    /// `0` removes the self-imposed limit.
+    pub fn set_recruiter_active_cap(env: Env, recruiter: Address, cap: u32) {
+        recruiter.require_auth();
+        let key = DataKey2::RecruiterActiveCap(recruiter.clone());
+        if cap == 0 {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &cap);
+        }
+        env.events().publish(
+            (Symbol::new(&env, "recruiter_active_cap_set"), recruiter),
+            cap,
+        );
+    }
+
+    /// Recruiter's self-imposed active engagement cap, if any (issue #482).
+    pub fn get_recruiter_active_cap(env: Env, recruiter: Address) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::RecruiterActiveCap(recruiter))
+    }
+
+    /// Admin sets a contract-wide cap on each recruiter's active engagements
+    /// (issue #482). `0` means unlimited.
+    pub fn set_max_active_per_recruiter(env: Env, admin: Address, count: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::Config(ConfigKey::MaxActivePerRecruiter), &count);
+        env.events()
+            .publish((Symbol::new(&env, "max_active_per_recruiter_set"),), count);
+    }
+
+    /// Admin-wide recruiter active engagement cap; `0` when unlimited (issue #482).
+    pub fn get_max_active_per_recruiter(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::MaxActivePerRecruiter))
+            .unwrap_or(0)
+    }
+
+    /// Count the recruiter's engagements currently in `Active` status.
+    fn recruiter_active_count(env: &Env, recruiter: &Address) -> u32 {
+        let ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RecruiterEngagements(recruiter.clone()))
+            .unwrap_or(Vec::new(env));
+        let mut count = 0u32;
+        for id in ids.iter() {
+            let engagement: Option<Engagement> =
+                env.storage().persistent().get(&DataKey::Engagement(id));
+            if matches!(engagement, Some(e) if e.status == EngagementStatus::Active) {
+                count += 1;
+            }
+        }
+        count
+    }
+
     pub(crate) fn create_engagement_impl(
         env: Env,
         engagement_id: String,
@@ -310,6 +370,29 @@ impl HireSettleContract {
             .unwrap_or(DEFAULT_MAX_ACTIVE_PER_COMPANY);
         if active_count >= max_active {
             panic!("CompanyActiveLimitReached");
+        }
+
+        // Issue #482: enforce the tighter of the recruiter's own cap and the
+        // admin-wide recruiter cap (0 / unset means no limit).
+        let personal_cap: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::RecruiterActiveCap(recruiter.clone()))
+            .unwrap_or(0);
+        let admin_cap: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::MaxActivePerRecruiter))
+            .unwrap_or(0);
+        let recruiter_cap = match (personal_cap, admin_cap) {
+            (0, 0) => None,
+            (0, c) | (c, 0) => Some(c),
+            (p, a) => Some(p.min(a)),
+        };
+        if let Some(cap) = recruiter_cap {
+            if Self::recruiter_active_count(&env, &recruiter) >= cap {
+                panic!("RecruiterActiveLimitReached");
+            }
         }
 
         let current_ledger = env.ledger().sequence();
