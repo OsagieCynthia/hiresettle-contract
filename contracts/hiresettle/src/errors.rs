@@ -28,21 +28,23 @@
 //! | `AlreadyInPool` | — | `arbiter_pool::add_arbiter_pool_member` | 1 |
 //! | `AlreadyRated` | — | `ratings::rate_recruiter` | 1 |
 //! | `amendment_expired` | — | `engagement::accept_split_amendment`, `engagement::reject_split_amendment` | 2 |
+//! | `AmendmentCooldownActive` | — | `engagement::propose_split_amendment` | 1 |
 //! | `amount must be greater than zero` | — | 5 functions in `engagement`, `features` | 5 |
 //! | `AmountBelowMinimum` | — | `engagement::create_engagement_impl` | 1 |
 //! | `ArbiterFeeTooHigh` | — | `admin::set_arbiter_fee` | 1 |
+//! | `ArbiterNotFound` | — | `transfers::admin_remove_arbiter` | 1 |
 //! | `ArbiterPoolTooSmall` | — | `arbiter_pool::draw_arbiter_panel` | 2 |
 //! | `ArbiterRecused` | — | `disputes::cast_arbiter_vote` | 1 |
 //! | `ArbiterWeightOverflow` | — | `engagement::create_engagement_impl` | 1 |
 //! | `ArbiterWeightsLengthMismatch` | — | `engagement::create_engagement_impl` | 1 |
-//! | `at least one arbiter required` | — | `bonds::create_engagement_bundle`, `engagement::create_engagement_impl` | 2 |
+//! | `at least one arbiter required` | — | `bonds::create_engagement_bundle`, `engagement::create_engagement_impl`, `transfers::admin_remove_arbiter` | 3 |
 //! | `BundleAlreadyExists` | — | `bonds::create_engagement_bundle` | 1 |
 //! | `BundleCompanyMismatch` | — | `bonds::load_bundle_for` | 1 |
 //! | `BundleNotFound` | — | `bonds::load_bundle_for` | 1 |
-//! | `can only dispute a submitted proof` | — | `disputes::raise_dispute` | 1 |
+//! | `can only dispute a submitted proof` | — | `disputes::assert_milestone_disputable` | 1 |
 //! | `Cannot expire completed engagement` | — | `admin::expire_engagement` | 1 |
 //! | `CompanyActiveLimitReached` | — | `engagement::create_engagement_impl` | 1 |
-//! | `CompanyArbiterCollision` | — | `bonds::create_engagement_bundle`, `engagement::create_engagement_impl` | 2 |
+//! | `CompanyArbiterCollision` | — | `bonds::create_engagement_bundle`, `engagement::create_engagement_impl`, `transfers::admin_add_arbiter` | 3 |
 //! | `CompanyRecruiterCollision` | — | `engagement::create_engagement_impl` | 1 |
 //! | `ConfirmWindowNotElapsed` | — | `disputes::force_confirm_milestone` | 1 |
 //! | `contract not initialised` | — | `admin::set_proof_cooldown` | 1 |
@@ -51,19 +53,20 @@
 //! | `discount too high` | — | `admin::set_referral_discount_bps` | 1 |
 //! | `dispute already resolvable without escalation` | — | `disputes::escalate_dispute` | 1 |
 //! | `dispute has not been escalated` | — | `disputes::resolve_escalation_timeout`, `disputes::super_arbiter_resolve` | 2 |
-//! | `DisputeWindowClosed` | — | `disputes::raise_dispute` | 1 |
+//! | `DisputeWindowClosed` | — | `disputes::assert_milestone_disputable` | 1 |
 //! | `DisputeWindowNotElapsed` | — | `disputes::escalate_dispute` | 1 |
 //! | `DisputeWindowProposalPending` | — | `disputes::propose_dispute_window_override` | 1 |
 //! | `duplicate vote` | — | `disputes::cast_arbiter_split_vote`, `disputes::cast_arbiter_vote` | 2 |
-//! | `DuplicateArbiter` | — | `bonds::create_engagement_bundle` | 1 |
+//! | `DuplicateArbiter` | — | `bonds::create_engagement_bundle`, `transfers::admin_add_arbiter` | 2 |
 //! | `DuplicateEmergencySigner` | — | `features::set_emergency_signers` | 1 |
+//! | `DuplicateMilestoneIndex` | — | `disputes::batch_raise_dispute` | 1 |
 //! | `DuplicateMilestoneName` | — | `engagement::create_engagement_impl` | 1 |
 //! | `DuplicateProofHash` | — | `milestones::submit_proof` | 1 |
-//! | `EmptyIndices` | — | `milestones::batch_confirm_milestones` | 1 |
+//! | `EmptyIndices` | — | `disputes::batch_raise_dispute`, `milestones::batch_confirm_milestones` | 2 |
 //! | `EmptyPauseReason` | — | `admin::pause_engagement` | 1 |
 //! | `engagement already exists` | — | `engagement::create_engagement_impl` | 1 |
-//! | `engagement is in a terminal state` | — | `disputes::set_arbiter_vote_delegate`, `transfers::claim_arbiter`, `transfers::nominate_arbiter_successor` | 3 |
-//! | `engagement is not active` | `ERR_ENGAGEMENT_NOT_ACTIVE` | 23 functions in `disputes`, `engagement`, `milestones`, `transfers` | 23 |
+//! | `engagement is in a terminal state` | — | `disputes::set_arbiter_vote_delegate`, `transfers::claim_arbiter`, `transfers::get_engagement_for_panel_change`, `transfers::nominate_arbiter_successor` | 4 |
+//! | `engagement is not active` | `ERR_ENGAGEMENT_NOT_ACTIVE` | 24 functions in `disputes`, `engagement`, `milestones`, `transfers` | 24 |
 //! | `engagement not found` | — | `helpers::get_engagement_internal` | 1 |
 //! | `EngagementNotCompleted` | — | `ratings::rate_recruiter` | 1 |
 //! | `EngagementPaused` | `ERR_ENGAGEMENT_PAUSED` | `helpers::assert_engagement_not_paused` | 1 |
@@ -73,10 +76,10 @@
 //! | `InsufficientCompanyBalance` | — | `features::debit_company_pool`, `features::withdraw_company_balance` | 2 |
 //! | `InsufficientRebateBalance` | — | `features::redeem_company_rebate` | 1 |
 //! | `invalid milestone index` | `ERR_INVALID_MILESTONE_INDEX` | `helpers::get_milestone_or_panic` | 1 |
-//! | `invalid quorum` | — | `bonds::create_engagement_bundle`, `engagement::create_engagement_impl` | 2 |
+//! | `invalid quorum` | — | `bonds::create_engagement_bundle`, `engagement::create_engagement_impl`, `transfers::assert_panel_quorum_valid` | 3 |
 //! | `InvalidAmountRange` | — | `queries::get_engagement_count_by_amount`, `queries::get_engagements_by_amount_range` | 2 |
 //! | `InvalidArbiterWeight` | — | `engagement::create_engagement_impl` | 1 |
-//! | `InvalidBondAmount` | — | `bonds::escrow_recruiter_bond` | 1 |
+//! | `InvalidBondAmount` | — | `bonds::escrow_bond` | 1 |
 //! | `InvalidBondForfeitBps` | — | `bonds::set_bond_forfeit_bps` | 1 |
 //! | `InvalidBundleId` | — | `bonds::create_engagement_bundle` | 1 |
 //! | `InvalidContractPdfHash` | — | `engagement::create_engagement_impl` | 1 |
@@ -127,13 +130,15 @@
 //! | `NotInPool` | — | `arbiter_pool::remove_arbiter_pool_member` | 1 |
 //! | `only placement milestones can be forfeited` | — | `milestones::trigger_no_show` | 1 |
 //! | `only retention milestones can be unlocked this way` | — | `milestones::unlock_milestone` | 1 |
+//! | `PanelChangeDuringDispute` | — | `transfers::get_engagement_for_panel_change` | 1 |
 //! | `PauseReasonTooLong` | — | `admin::pause_engagement` | 1 |
 //! | `placement not yet confirmed — use cancel_engagement instead` | — | `engagement::request_replacement` | 1 |
 //! | `PrerequisiteCycle` | — | `helpers::validate_milestone_prerequisites` | 1 |
 //! | `PreviousMilestoneNotComplete` | — | `helpers::assert_prerequisites_complete`, `milestones::batch_confirm_milestones` | 2 |
 //! | `ProofHashTooLong` | — | `milestones::submit_proof` | 1 |
-//! | `ReasonTooLong` | — | `disputes::raise_dispute` | 1 |
-//! | `RecruiterArbiterCollision` | — | `engagement::create_engagement_impl` | 1 |
+//! | `QuorumUnreachable` | — | `transfers::admin_remove_arbiter` | 1 |
+//! | `ReasonTooLong` | — | `disputes::batch_raise_dispute`, `disputes::raise_dispute` | 2 |
+//! | `RecruiterArbiterCollision` | — | `engagement::create_engagement_impl`, `transfers::admin_add_arbiter` | 2 |
 //! | `referrer already exists` | — | `admin::add_referrer` | 1 |
 //! | `referrer not found` | — | `admin::remove_referrer` | 1 |
 //! | `replacement reason too long` | — | `engagement::request_replacement` | 1 |
@@ -155,7 +160,7 @@
 //! | `too many IDs` | — | `queries::batch_get_engagement_summary` | 1 |
 //! | `TooManyMilestones` | — | `engagement::create_engagement_impl` | 1 |
 //! | `TooManyTags` | — | `engagement::create_engagement_impl` | 1 |
-//! | `unauthorized` | `ERR_UNAUTHORIZED` | 28 functions in `admin`, `disputes`, `engagement`, `features`, `helpers`, `milestones`, `ratings`, `transfers` | 29 |
+//! | `unauthorized` | `ERR_UNAUTHORIZED` | 29 functions in `admin`, `disputes`, `engagement`, `features`, `helpers`, `milestones`, `ratings`, `transfers` | 30 |
 //! | `unknown config change fn_id` | — | `features::apply_pending_config_change` | 1 |
 //! | `UpgradeLockNotElapsed` | — | `admin::execute_upgrade` | 1 |
 //! | `VersionTooLong` | — | `admin::set_version` | 1 |

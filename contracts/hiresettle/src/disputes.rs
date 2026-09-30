@@ -87,6 +87,101 @@ impl HireSettleContract {
         Self::extend_engagement_ttl(&env, &engagement_id);
     }
 
+    // ----------------------------------------------------------
+    // ISSUE #498 — BATCH RAISE DISPUTE
+    // ----------------------------------------------------------
+
+    /// Raise a dispute on several `ProofSubmitted` milestones of the same
+    /// engagement in one call, all sharing `reason`. All-or-nothing, like
+    /// `batch_confirm_milestones`: every index is validated before any
+    /// milestone is touched, so one bad index rejects the whole batch.
+    ///
+    /// Each milestone ends up in exactly the state a separate `raise_dispute`
+    /// call would leave it in (same `DisputeReason`, `DisputeRaisedAt`,
+    /// dispute-history entry and arbiter-assignment count), because both
+    /// paths share the same helpers.
+    ///
+    /// # Panics
+    /// - `"EngagementPaused"` — the engagement has been paused by the admin.
+    /// - `"EmptyIndices"` — `milestone_indices` is empty.
+    /// - `"ReasonTooLong"` — `reason` is longer than 128 bytes.
+    /// - `"DuplicateMilestoneIndex"` — an index appears more than once.
+    /// - `"engagement not found"` / `"engagement is not active"` /
+    ///   `"unauthorized"` — same as `raise_dispute`.
+    /// - `"invalid milestone index"` / `"can only dispute a submitted proof"` /
+    ///   `"DisputeWindowClosed"` — any single index fails the `raise_dispute`
+    ///   preconditions.
+    ///
+    /// # Events
+    /// One `("dispute_raised", engagement_id)` with `(milestone_index, reason)`
+    /// per milestone (plus its `milestone_status_changed`), then one
+    /// `("disputes_batch_raised", engagement_id)` with
+    /// `(milestone_indices, reason)` for the batch.
+    pub fn batch_raise_dispute(
+        env: Env,
+        company: Address,
+        engagement_id: String,
+        milestone_indices: Vec<u32>,
+        reason: String,
+    ) {
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        company.require_auth();
+
+        if milestone_indices.is_empty() {
+            panic!("EmptyIndices");
+        }
+        if reason.len() > 128 {
+            panic!("ReasonTooLong");
+        }
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+
+        if !Self::is_authorized_company(&env, &company, &engagement.company) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        // Validate every index before mutating anything (atomic rejection).
+        for i in 0..milestone_indices.len() {
+            let idx = milestone_indices.get(i).unwrap();
+            for j in (i + 1)..milestone_indices.len() {
+                if milestone_indices.get(j).unwrap() == idx {
+                    panic!("DuplicateMilestoneIndex");
+                }
+            }
+            Self::assert_milestone_disputable(&env, &engagement, &engagement_id, idx);
+        }
+
+        for i in 0..milestone_indices.len() {
+            let idx = milestone_indices.get(i).unwrap();
+            Self::apply_dispute_raised(
+                &env,
+                &mut engagement,
+                &engagement_id,
+                idx,
+                &company,
+                &reason,
+            );
+        }
+
+        engagement.last_activity_ledger = env.ledger().sequence();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "disputes_batch_raised"),
+                engagement_id.clone(),
+            ),
+            (milestone_indices, reason),
+        );
+    }
+
     /// Panic unless `milestone_index` can be disputed right now: it must exist,
     /// be `ProofSubmitted`, and still be inside the dispute window. Shared by
     /// `raise_dispute` and `batch_raise_dispute` so both reject with the same
