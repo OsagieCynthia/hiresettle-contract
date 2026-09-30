@@ -64,3 +64,10 @@ pub(crate) const FN_SET_REFERRAL_DISCOUNT_BPS: u32 = 3;
 pub(crate) const FN_SET_ARBITER_FEE: u32 = 4;
 pub(crate) const FN_SET_MIN_AMOUNT: u32 = 5;
 pub(crate) const FN_SET_FEE_REBATE_BPS: u32 = 6;
+
+/// Default risk-score points per active dispute (issue #480).
+pub(crate) const DEFAULT_RISK_DISPUTE_WEIGHT: u32 = 30;
+/// Default risk-score points per recruiter replacement (issue #480).
+pub(crate) const DEFAULT_RISK_REPLACEMENT_WEIGHT: u32 = 20;
+/// Default risk-score points per granted milestone extension (issue #480).
+pub(crate) const DEFAULT_RISK_EXTENSION_WEIGHT: u32 = 10;

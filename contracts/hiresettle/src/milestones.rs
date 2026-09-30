@@ -360,12 +360,13 @@ impl HireSettleContract {
                 let tiered_bps = Self::engagement_tier_bps(
                     &env,
                     &engagement_id,
-                    platform_fee.bps,
+                    Self::token_base_bps(&env, &engagement.token, platform_fee.bps),
                     engagement.total_amount,
                 );
                 Self::apply_referral_discount(&env, tiered_bps, &engagement.referrer)
             };
-            let fee_amount = (payment * effective_bps as i128) / 10_000;
+            let fee_amount =
+                Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
 
@@ -549,7 +550,7 @@ impl HireSettleContract {
         let effective_bps = Self::effective_platform_fee_bps(
             &env,
             &engagement_id,
-            platform_fee.bps,
+            Self::token_base_bps(&env, &engagement.token, platform_fee.bps),
             engagement.total_amount,
         );
         let token_client = token::Client::new(&env, &engagement.token);
@@ -559,7 +560,8 @@ impl HireSettleContract {
             let mut m = engagement.milestones.get(idx).unwrap();
 
             let payment = (engagement.total_amount * m.payment_percent as i128) / 100;
-            let fee_amount = (payment * effective_bps as i128) / 10_000;
+            let fee_amount =
+                Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
 

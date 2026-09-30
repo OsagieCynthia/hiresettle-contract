@@ -718,4 +718,45 @@ impl HireSettleContract {
         }
         (unlocked, total)
     }
+
+    /// Return the number of milestones currently in `Disputed` status.
+    /// Read-only and permissionless. Returns 0 when no disputes are active.
+    pub fn get_active_dispute_count(env: Env, engagement_id: String) -> u32 {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let mut count: u32 = 0;
+        for i in 0..engagement.milestones.len() {
+            if engagement.milestones.get(i).unwrap().status == MilestoneStatus::Disputed {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Engagement risk score (issue #480), computed live on every read:
+    ///
+    /// `score = active_disputes * dispute_weight
+    ///        + replacements * replacement_weight
+    ///        + granted_extensions * extension_weight`
+    ///
+    /// where `granted_extensions` sums `MilestoneExtensionCount` across all
+    /// milestones. A clean engagement scores 0. Saturates at `u32::MAX`.
+    pub fn get_engagement_risk_score(env: Env, engagement_id: String) -> u32 {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let w = Self::risk_score_weights_internal(&env);
+        let disputes = Self::get_active_dispute_count(env.clone(), engagement_id.clone());
+        let replacements = Self::get_replacement_count(env.clone(), engagement_id.clone());
+        let mut extensions: u32 = 0;
+        for i in 0..engagement.milestones.len() {
+            let n: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey2::MilestoneExtensionCount(engagement_id.clone(), i))
+                .unwrap_or(0);
+            extensions = extensions.saturating_add(n);
+        }
+        disputes
+            .saturating_mul(w.dispute_weight)
+            .saturating_add(replacements.saturating_mul(w.replacement_weight))
+            .saturating_add(extensions.saturating_mul(w.extension_weight))
+    }
 }
