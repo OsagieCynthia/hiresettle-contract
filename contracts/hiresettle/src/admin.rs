@@ -480,6 +480,37 @@ impl HireSettleContract {
             .publish((Symbol::new(&env, "min_amount_set"),), amount);
     }
 
+    /// Admin sets the minimum quorum-to-panel-size ratio, in basis points,
+    /// that `create_engagement` enforces (issue #502). A panel of total
+    /// weight `N` (arbiter count when unweighted) must then use a quorum of
+    /// at least `ceil(N * bps / 10_000)`, so a large panel cannot be reduced
+    /// to a single rubber-stamp arbiter. `0` (the default) disables the
+    /// check. Only affects engagements created after the change.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is not the admin.
+    /// - `"InvalidQuorumRatio"` — `bps` exceeds 10 000.
+    pub fn set_min_quorum_ratio_bps(env: Env, admin: Address, bps: u32) {
+        Self::assert_admin(&env, &admin);
+        if bps > MAX_MIN_QUORUM_RATIO_BPS {
+            panic!("InvalidQuorumRatio");
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Config(ConfigKey::MinQuorumRatioBps), &bps);
+        env.events()
+            .publish((Symbol::new(&env, "min_quorum_ratio_set"),), bps);
+    }
+
+    /// Return the minimum quorum-to-panel-size ratio in basis points
+    /// (issue #502). `0` means no minimum.
+    pub fn get_min_quorum_ratio_bps(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::MinQuorumRatioBps))
+            .unwrap_or(0u32)
+    }
+
     /// Admin sets a per-token minimum engagement amount override, in that
     /// token's own smallest unit (issue #366). Takes precedence over the
     /// admin-wide `MinEngagementAmount` for `token` specifically, so an
