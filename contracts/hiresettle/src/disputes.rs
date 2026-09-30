@@ -54,6 +54,7 @@ impl HireSettleContract {
         reason: String,
     ) {
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         company.require_auth();
 
         if reason.len() > 128 {
@@ -157,6 +158,7 @@ impl HireSettleContract {
     ) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         arbiter.require_auth();
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
@@ -495,6 +497,7 @@ impl HireSettleContract {
     ) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         arbiter.require_auth();
 
         if !Self::is_split_voting_enabled(env.clone(), engagement_id.clone()) {
@@ -807,6 +810,7 @@ impl HireSettleContract {
     pub fn escalate_dispute(env: Env, engagement_id: String, milestone_index: u32) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
 
         let engagement = Self::get_engagement_internal(&env, &engagement_id);
 
@@ -906,6 +910,7 @@ impl HireSettleContract {
     ) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         super_arbiter.require_auth();
 
         let configured: Address = env
@@ -1148,6 +1153,7 @@ impl HireSettleContract {
     pub fn resolve_escalation_timeout(env: Env, engagement_id: String, milestone_index: u32) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
 
@@ -1574,6 +1580,7 @@ impl HireSettleContract {
     ) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         caller.require_auth();
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
@@ -1716,6 +1723,7 @@ impl HireSettleContract {
     ) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         arbiter.require_auth();
 
         let engagement = Self::get_engagement_internal(&env, &engagement_id);
