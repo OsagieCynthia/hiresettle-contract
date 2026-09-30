@@ -70,35 +70,77 @@ impl HireSettleContract {
             panic!("{}", ERR_UNAUTHORIZED);
         }
 
-        let mut milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        Self::assert_milestone_disputable(&env, &engagement, &engagement_id, milestone_index);
+        Self::apply_dispute_raised(
+            &env,
+            &mut engagement,
+            &engagement_id,
+            milestone_index,
+            &company,
+            &reason,
+        );
+
+        engagement.last_activity_ledger = env.ledger().sequence();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+    }
+
+    /// Panic unless `milestone_index` can be disputed right now: it must exist,
+    /// be `ProofSubmitted`, and still be inside the dispute window. Shared by
+    /// `raise_dispute` and `batch_raise_dispute` so both reject with the same
+    /// messages.
+    fn assert_milestone_disputable(
+        env: &Env,
+        engagement: &Engagement,
+        engagement_id: &String,
+        milestone_index: u32,
+    ) {
+        let milestone = Self::get_milestone_or_panic(engagement, milestone_index);
 
         if milestone.status != MilestoneStatus::ProofSubmitted {
             panic!("can only dispute a submitted proof");
         }
 
         let current_ledger = env.ledger().sequence();
-        let dispute_window = Self::engagement_dispute_window_internal(&env, &engagement_id);
+        let dispute_window = Self::engagement_dispute_window_internal(env, engagement_id);
 
         if current_ledger > milestone.proof_submitted_at + dispute_window {
             panic!("DisputeWindowClosed");
         }
+    }
+
+    /// Move an already-validated milestone to `Disputed`: store the reason and
+    /// raise ledger, update arbiter stats and the dispute timeline, and emit
+    /// `milestone_status_changed` + `dispute_raised`. Only mutates the
+    /// in-memory `engagement`; the caller persists it.
+    fn apply_dispute_raised(
+        env: &Env,
+        engagement: &mut Engagement,
+        engagement_id: &String,
+        milestone_index: u32,
+        company: &Address,
+        reason: &String,
+    ) {
+        let current_ledger = env.ledger().sequence();
+        let mut milestone = engagement.milestones.get(milestone_index).unwrap();
 
         let old_status = milestone.status.clone();
         milestone.status = MilestoneStatus::Disputed;
         engagement.milestones.set(milestone_index, milestone);
-        engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage().persistent().set(
             &DataKey::DisputeReason(engagement_id.clone(), milestone_index),
-            &reason.clone(),
+            reason,
         );
 
         // Issue #501: durable record for the engagement timeline;
         // `DisputeReason` above is cleared once the dispute resolves.
-        Self::record_dispute_raised(&env, &engagement_id, milestone_index, &company, &reason);
+        Self::record_dispute_raised(env, engagement_id, milestone_index, company, reason);
 
         // Issue #468: every panel member is now on the hook for a vote.
-        Self::record_arbiter_assignments(&env, &engagement.arbiters);
+        Self::record_arbiter_assignments(env, &engagement.arbiters);
 
         // Issue #246: record when the dispute was raised so `escalate_dispute`
         // can measure elapsed time against the dispute window.
@@ -107,22 +149,17 @@ impl HireSettleContract {
             &current_ledger,
         );
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
-
         Self::emit_milestone_status_changed(
-            &env,
-            &engagement_id,
+            env,
+            engagement_id,
             milestone_index,
             old_status,
             MilestoneStatus::Disputed,
         );
 
         env.events().publish(
-            (Symbol::new(&env, "dispute_raised"), engagement_id.clone()),
-            (milestone_index, reason),
+            (Symbol::new(env, "dispute_raised"), engagement_id.clone()),
+            (milestone_index, reason.clone()),
         );
     }
 
