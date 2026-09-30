@@ -96,6 +96,96 @@ impl HireSettleContract {
         (fee.bps, fee.treasury)
     }
 
+    /// Set the minimum absolute platform fee charged per fee-bearing payout
+    /// (issue #478). 0 (the default) disables the floor. The floor never
+    /// raises a fee above the payout itself and does not apply to waived
+    /// engagements.
+    pub fn set_platform_fee_floor(env: Env, admin: Address, floor_amount: i128) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        if floor_amount < 0 {
+            panic!("InvalidFeeFloor");
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey2::PlatformFeeFloor, &floor_amount);
+        env.events()
+            .publish((Symbol::new(&env, "platform_fee_floor_set"),), floor_amount);
+    }
+
+    /// Return the platform fee floor (0 when unset).
+    pub fn get_platform_fee_floor(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::PlatformFeeFloor)
+            .unwrap_or(0)
+    }
+
+    /// Override the base platform-fee bps for engagements in `token`
+    /// (issue #479). Tiers and referral discounts apply on top of this base.
+    /// Capped at 500 bps like `set_platform_fee`.
+    pub fn set_token_platform_fee(env: Env, admin: Address, token: Address, bps: u32) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        if bps > MAX_PLATFORM_FEE_BPS {
+            panic!("FeeTooHigh");
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey2::TokenPlatformFee(token.clone()), &bps);
+        env.events()
+            .publish((Symbol::new(&env, "token_platform_fee_set"),), (token, bps));
+    }
+
+    /// Remove a per-token fee override; the token falls back to the global rate.
+    pub fn remove_token_platform_fee(env: Env, admin: Address, token: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .remove(&DataKey2::TokenPlatformFee(token.clone()));
+        env.events()
+            .publish((Symbol::new(&env, "token_platform_fee_removed"),), token);
+    }
+
+    /// Return the per-token base bps override, if any.
+    pub fn get_token_platform_fee(env: Env, token: Address) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::TokenPlatformFee(token))
+    }
+
+    /// Set the weights used by `get_engagement_risk_score` (issue #480).
+    pub fn set_risk_score_weights(
+        env: Env,
+        admin: Address,
+        dispute_weight: u32,
+        replacement_weight: u32,
+        extension_weight: u32,
+    ) {
+        Self::assert_admin(&env, &admin);
+        env.storage().persistent().set(
+            &DataKey2::RiskScoreWeights,
+            &RiskScoreWeights {
+                dispute_weight,
+                replacement_weight,
+                extension_weight,
+            },
+        );
+        env.events().publish(
+            (Symbol::new(&env, "risk_score_weights_set"),),
+            (dispute_weight, replacement_weight, extension_weight),
+        );
+    }
+
+    /// Return the risk score weights as `(dispute, replacement, extension)`.
+    /// Defaults to `(DEFAULT_RISK_DISPUTE_WEIGHT, DEFAULT_RISK_REPLACEMENT_WEIGHT,
+    /// DEFAULT_RISK_EXTENSION_WEIGHT)`.
+    pub fn get_risk_score_weights(env: Env) -> (u32, u32, u32) {
+        let w = Self::risk_score_weights_internal(&env);
+        (w.dispute_weight, w.replacement_weight, w.extension_weight)
+    }
+
 
     /// Admin waives the platform fee for a single engagement (issue #335),
     /// zeroing it for every future milestone payout on that engagement
@@ -388,6 +478,37 @@ impl HireSettleContract {
             .set(&DataKey::Config(ConfigKey::MinEngagementAmount), &amount);
         env.events()
             .publish((Symbol::new(&env, "min_amount_set"),), amount);
+    }
+
+    /// Admin sets the minimum quorum-to-panel-size ratio, in basis points,
+    /// that `create_engagement` enforces (issue #502). A panel of total
+    /// weight `N` (arbiter count when unweighted) must then use a quorum of
+    /// at least `ceil(N * bps / 10_000)`, so a large panel cannot be reduced
+    /// to a single rubber-stamp arbiter. `0` (the default) disables the
+    /// check. Only affects engagements created after the change.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is not the admin.
+    /// - `"InvalidQuorumRatio"` — `bps` exceeds 10 000.
+    pub fn set_min_quorum_ratio_bps(env: Env, admin: Address, bps: u32) {
+        Self::assert_admin(&env, &admin);
+        if bps > MAX_MIN_QUORUM_RATIO_BPS {
+            panic!("InvalidQuorumRatio");
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Config(ConfigKey::MinQuorumRatioBps), &bps);
+        env.events()
+            .publish((Symbol::new(&env, "min_quorum_ratio_set"),), bps);
+    }
+
+    /// Return the minimum quorum-to-panel-size ratio in basis points
+    /// (issue #502). `0` means no minimum.
+    pub fn get_min_quorum_ratio_bps(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::MinQuorumRatioBps))
+            .unwrap_or(0u32)
     }
 
     /// Admin sets a per-token minimum engagement amount override, in that

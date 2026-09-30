@@ -71,35 +71,180 @@ impl HireSettleContract {
             panic!("{}", ERR_UNAUTHORIZED);
         }
 
-        let mut milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        Self::assert_milestone_disputable(&env, &engagement, &engagement_id, milestone_index);
+        Self::apply_dispute_raised(
+            &env,
+            &mut engagement,
+            &engagement_id,
+            milestone_index,
+            &company,
+            &reason,
+        );
+
+        engagement.last_activity_ledger = env.ledger().sequence();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #498 — BATCH RAISE DISPUTE
+    // ----------------------------------------------------------
+
+    /// Raise a dispute on several `ProofSubmitted` milestones of the same
+    /// engagement in one call, all sharing `reason`. All-or-nothing, like
+    /// `batch_confirm_milestones`: every index is validated before any
+    /// milestone is touched, so one bad index rejects the whole batch.
+    ///
+    /// Each milestone ends up in exactly the state a separate `raise_dispute`
+    /// call would leave it in (same `DisputeReason`, `DisputeRaisedAt`,
+    /// dispute-history entry and arbiter-assignment count), because both
+    /// paths share the same helpers.
+    ///
+    /// # Panics
+    /// - `"EngagementPaused"` — the engagement has been paused by the admin.
+    /// - `"EmptyIndices"` — `milestone_indices` is empty.
+    /// - `"ReasonTooLong"` — `reason` is longer than 128 bytes.
+    /// - `"DuplicateMilestoneIndex"` — an index appears more than once.
+    /// - `"engagement not found"` / `"engagement is not active"` /
+    ///   `"unauthorized"` — same as `raise_dispute`.
+    /// - `"invalid milestone index"` / `"can only dispute a submitted proof"` /
+    ///   `"DisputeWindowClosed"` — any single index fails the `raise_dispute`
+    ///   preconditions.
+    ///
+    /// # Events
+    /// One `("dispute_raised", engagement_id)` with `(milestone_index, reason)`
+    /// per milestone (plus its `milestone_status_changed`), then one
+    /// `("disputes_batch_raised", engagement_id)` with
+    /// `(milestone_indices, reason)` for the batch.
+    pub fn batch_raise_dispute(
+        env: Env,
+        company: Address,
+        engagement_id: String,
+        milestone_indices: Vec<u32>,
+        reason: String,
+    ) {
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        company.require_auth();
+
+        if milestone_indices.is_empty() {
+            panic!("EmptyIndices");
+        }
+        if reason.len() > 128 {
+            panic!("ReasonTooLong");
+        }
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+
+        if !Self::is_authorized_company(&env, &company, &engagement.company) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        // Validate every index before mutating anything (atomic rejection).
+        for i in 0..milestone_indices.len() {
+            let idx = milestone_indices.get(i).unwrap();
+            for j in (i + 1)..milestone_indices.len() {
+                if milestone_indices.get(j).unwrap() == idx {
+                    panic!("DuplicateMilestoneIndex");
+                }
+            }
+            Self::assert_milestone_disputable(&env, &engagement, &engagement_id, idx);
+        }
+
+        for i in 0..milestone_indices.len() {
+            let idx = milestone_indices.get(i).unwrap();
+            Self::apply_dispute_raised(
+                &env,
+                &mut engagement,
+                &engagement_id,
+                idx,
+                &company,
+                &reason,
+            );
+        }
+
+        engagement.last_activity_ledger = env.ledger().sequence();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "disputes_batch_raised"),
+                engagement_id.clone(),
+            ),
+            (milestone_indices, reason),
+        );
+    }
+
+    /// Panic unless `milestone_index` can be disputed right now: it must exist,
+    /// be `ProofSubmitted`, and still be inside the dispute window. Shared by
+    /// `raise_dispute` and `batch_raise_dispute` so both reject with the same
+    /// messages.
+    fn assert_milestone_disputable(
+        env: &Env,
+        engagement: &Engagement,
+        engagement_id: &String,
+        milestone_index: u32,
+    ) {
+        let milestone = Self::get_milestone_or_panic(engagement, milestone_index);
 
         if milestone.status != MilestoneStatus::ProofSubmitted {
             panic!("can only dispute a submitted proof");
         }
 
         let current_ledger = env.ledger().sequence();
-        let dispute_window = Self::engagement_dispute_window_internal(&env, &engagement_id);
+        let dispute_window = Self::engagement_dispute_window_internal(env, engagement_id);
 
         if current_ledger > milestone.proof_submitted_at + dispute_window {
             panic!("DisputeWindowClosed");
         }
+    }
+
+    /// Move an already-validated milestone to `Disputed`: store the reason and
+    /// raise ledger, update arbiter stats and the dispute timeline, and emit
+    /// `milestone_status_changed` + `dispute_raised`. Only mutates the
+    /// in-memory `engagement`; the caller persists it.
+    fn apply_dispute_raised(
+        env: &Env,
+        engagement: &mut Engagement,
+        engagement_id: &String,
+        milestone_index: u32,
+        company: &Address,
+        reason: &String,
+    ) {
+        let current_ledger = env.ledger().sequence();
+        let mut milestone = engagement.milestones.get(milestone_index).unwrap();
+
+        // Issue #481: bound how many times a milestone can be re-disputed.
+        let cycles_key = DataKey2::DisputeCycles(engagement_id.clone(), milestone_index);
+        let cycles: u32 = env.storage().persistent().get(&cycles_key).unwrap_or(0);
+        if cycles >= Self::get_max_dispute_cycles(env.clone()) {
+            panic!("MaxDisputeCyclesReached");
+        }
+        env.storage().persistent().set(&cycles_key, &(cycles + 1));
 
         let old_status = milestone.status.clone();
         milestone.status = MilestoneStatus::Disputed;
         engagement.milestones.set(milestone_index, milestone);
-        engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage().persistent().set(
             &DataKey::DisputeReason(engagement_id.clone(), milestone_index),
-            &reason.clone(),
+            reason,
         );
 
         // Issue #501: durable record for the engagement timeline;
         // `DisputeReason` above is cleared once the dispute resolves.
-        Self::record_dispute_raised(&env, &engagement_id, milestone_index, &company, &reason);
+        Self::record_dispute_raised(env, engagement_id, milestone_index, company, reason);
 
         // Issue #468: every panel member is now on the hook for a vote.
-        Self::record_arbiter_assignments(&env, &engagement.arbiters);
+        Self::record_arbiter_assignments(env, &engagement.arbiters);
 
         // Issue #246: record when the dispute was raised so `escalate_dispute`
         // can measure elapsed time against the dispute window.
@@ -108,22 +253,17 @@ impl HireSettleContract {
             &current_ledger,
         );
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
-
         Self::emit_milestone_status_changed(
-            &env,
-            &engagement_id,
+            env,
+            engagement_id,
             milestone_index,
             old_status,
             MilestoneStatus::Disputed,
         );
 
         env.events().publish(
-            (Symbol::new(&env, "dispute_raised"), engagement_id.clone()),
-            (milestone_index, reason),
+            (Symbol::new(env, "dispute_raised"), engagement_id.clone()),
+            (milestone_index, reason.clone()),
         );
     }
 
@@ -320,10 +460,13 @@ impl HireSettleContract {
         let effective_bps = if Self::is_fee_waived_internal(env, engagement_id) {
             0
         } else {
-            Self::apply_referral_discount(env, platform_fee.bps, &engagement.referrer)
+            let base_bps = Self::token_base_bps(env, &engagement.token, platform_fee.bps);
+            let tiered_bps =
+                Self::engagement_tier_bps(env, engagement_id, base_bps, engagement.total_amount);
+            Self::apply_referral_discount(env, tiered_bps, &engagement.referrer)
         };
-        Self::resolve_platform_fee_bps(env, platform_fee.bps, engagement.total_amount);
-        let platform_fee_amount = (payment * effective_bps as i128) / 10_000;
+        let platform_fee_amount =
+            Self::platform_fee_amount(env, engagement_id, payment, effective_bps);
         let after_platform_fee = payment - platform_fee_amount;
 
         let arbiter_fee_bps: u32 = env
@@ -771,6 +914,7 @@ impl HireSettleContract {
     /// on escalated disputes.
     pub fn set_super_arbiter(env: Env, admin: Address, super_arbiter: Address) {
         Self::assert_admin(&env, &admin);
+        env.storage().instance().remove(&DataKey2::SuperArbiterPanel);
         env.storage()
             .instance()
             .set(&DataKey::SuperArbiter, &super_arbiter);
@@ -781,6 +925,67 @@ impl HireSettleContract {
     /// Return the currently configured super-arbiter address, if any.
     pub fn get_super_arbiter(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::SuperArbiter)
+    }
+
+    /// Admin configures an M-of-N super arbiter panel (issue #483). Clears
+    /// any single address set via `set_super_arbiter`, and vice versa.
+    ///
+    /// # Panics
+    /// - `"InvalidSuperArbiterPanel"` — `members` is empty, contains
+    ///   duplicates, or `quorum` is 0 or exceeds the member count.
+    pub fn set_super_arbiter_panel(env: Env, admin: Address, members: Vec<Address>, quorum: u32) {
+        Self::assert_admin(&env, &admin);
+        if members.is_empty() || quorum == 0 || quorum > members.len() {
+            panic!("InvalidSuperArbiterPanel");
+        }
+        for i in 0..members.len() {
+            if members.first_index_of(members.get(i).unwrap()) != Some(i) {
+                panic!("InvalidSuperArbiterPanel");
+            }
+        }
+        env.storage().instance().remove(&DataKey::SuperArbiter);
+        env.storage()
+            .instance()
+            .set(&DataKey2::SuperArbiterPanel, &(members.clone(), quorum));
+        env.events().publish(
+            (Symbol::new(&env, "super_arbiter_panel_set"),),
+            (members, quorum),
+        );
+    }
+
+    /// Return the configured super arbiter panel `(members, quorum)`, if any.
+    pub fn get_super_arbiter_panel(env: Env) -> Option<(Vec<Address>, u32)> {
+        env.storage().instance().get(&DataKey2::SuperArbiterPanel)
+    }
+
+    /// Admin sets the maximum number of disputes that may be raised on a
+    /// single milestone (issue #481). `0` restores unlimited cycles.
+    pub fn set_max_dispute_cycles(env: Env, admin: Address, count: u32) {
+        Self::assert_admin(&env, &admin);
+        let key = DataKey::Config(ConfigKey::MaxDisputeCycles);
+        if count == 0 {
+            env.storage().instance().remove(&key);
+        } else {
+            env.storage().instance().set(&key, &count);
+        }
+        env.events()
+            .publish((Symbol::new(&env, "max_dispute_cycles_set"),), count);
+    }
+
+    /// Maximum disputes per milestone; `u32::MAX` when unlimited (issue #481).
+    pub fn get_max_dispute_cycles(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::MaxDisputeCycles))
+            .unwrap_or(u32::MAX)
+    }
+
+    /// Number of disputes raised so far on a milestone (issue #481).
+    pub fn get_dispute_cycles(env: Env, engagement_id: String, milestone_index: u32) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::DisputeCycles(engagement_id, milestone_index))
+            .unwrap_or(0)
     }
 
     /// Return whether a disputed milestone has been auto-escalated to the
@@ -836,7 +1041,15 @@ impl HireSettleContract {
         let dispute_window = Self::engagement_dispute_window_internal(&env, &engagement_id);
 
         let current_ledger = env.ledger().sequence();
-        if current_ledger <= raised_at + dispute_window {
+        // Issue #481: a milestone at its dispute-cycle cap can be escalated
+        // immediately instead of waiting out the dispute window.
+        let cycles: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::DisputeCycles(engagement_id.clone(), milestone_index))
+            .unwrap_or(0);
+        let cap_reached = cycles >= Self::get_max_dispute_cycles(env.clone());
+        if !cap_reached && current_ledger <= raised_at + dispute_window {
             panic!("DisputeWindowNotElapsed");
         }
 
@@ -853,11 +1066,15 @@ impl HireSettleContract {
             panic!("dispute already resolvable without escalation");
         }
 
-        let super_arbiter: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::SuperArbiter)
-            .unwrap_or_else(|| panic!("no super arbiter configured"));
+        // Issue #483: with a panel configured, the event carries the contract
+        // address in place of a single super arbiter.
+        let super_arbiter: Address = match env.storage().instance().get(&DataKey::SuperArbiter) {
+            Some(addr) => addr,
+            None if env.storage().instance().has(&DataKey2::SuperArbiterPanel) => {
+                env.current_contract_address()
+            }
+            None => panic!("no super arbiter configured"),
+        };
 
         env.storage().persistent().set(
             &DataKey::EscalatedDispute(engagement_id.clone(), milestone_index),
@@ -913,13 +1130,24 @@ impl HireSettleContract {
         Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         super_arbiter.require_auth();
 
-        let configured: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::SuperArbiter)
-            .unwrap_or_else(|| panic!("no super arbiter configured"));
-        if super_arbiter != configured {
-            panic!("{}", ERR_UNAUTHORIZED);
+        let panel: Option<(Vec<Address>, u32)> =
+            env.storage().instance().get(&DataKey2::SuperArbiterPanel);
+        match &panel {
+            Some((members, _)) => {
+                if !members.contains(&super_arbiter) {
+                    panic!("{}", ERR_UNAUTHORIZED);
+                }
+            }
+            None => {
+                let configured: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::SuperArbiter)
+                    .unwrap_or_else(|| panic!("no super arbiter configured"));
+                if super_arbiter != configured {
+                    panic!("{}", ERR_UNAUTHORIZED);
+                }
+            }
         }
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
@@ -944,6 +1172,37 @@ impl HireSettleContract {
             panic!("dispute has not been escalated");
         }
 
+        // Issue #483: a panel resolves only once `quorum` members agree.
+        let panel_votes_key = DataKey2::SuperArbiterVotes(engagement_id.clone(), milestone_index);
+        if let Some((_, quorum)) = panel {
+            let (mut approvers, mut rejecters): (Vec<Address>, Vec<Address>) = env
+                .storage()
+                .persistent()
+                .get(&panel_votes_key)
+                .unwrap_or((Vec::new(&env), Vec::new(&env)));
+            if approvers.contains(&super_arbiter) || rejecters.contains(&super_arbiter) {
+                panic!("AlreadyVoted");
+            }
+            let tally = if approve {
+                approvers.push_back(super_arbiter.clone());
+                approvers.len()
+            } else {
+                rejecters.push_back(super_arbiter.clone());
+                rejecters.len()
+            };
+            if tally < quorum {
+                env.storage()
+                    .persistent()
+                    .set(&panel_votes_key, &(approvers, rejecters));
+                env.events().publish(
+                    (Symbol::new(&env, "super_arbiter_vote"), engagement_id),
+                    (milestone_index, super_arbiter, approve),
+                );
+                return;
+            }
+        }
+        env.storage().persistent().remove(&panel_votes_key);
+
         // Issue #317: this call always concludes an escalated dispute (either
         // branch below), so it always counts toward the resolution total.
         Self::increment_super_arbiter_resolution_count(&env);
@@ -965,12 +1224,13 @@ impl HireSettleContract {
                 let tiered_bps = Self::engagement_tier_bps(
                     &env,
                     &engagement_id,
-                    platform_fee.bps,
+                    Self::token_base_bps(&env, &engagement.token, platform_fee.bps),
                     engagement.total_amount,
                 );
                 Self::apply_referral_discount(&env, tiered_bps, &engagement.referrer)
             };
-            let platform_fee_amount = (payment * effective_bps as i128) / 10_000;
+            let platform_fee_amount =
+                Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
             let after_platform_fee = payment - platform_fee_amount;
 
             let arbiter_fee_bps: u32 = env
@@ -1196,6 +1456,10 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .remove(&DataKey2::ArbiterSplitVotes(engagement_id.clone(), milestone_index));
+        // Issue #483: an insufficient panel tally is discarded on timeout.
+        env.storage()
+            .persistent()
+            .remove(&DataKey2::SuperArbiterVotes(engagement_id.clone(), milestone_index));
 
         let payment = (engagement.total_amount * milestone.payment_percent as i128) / 100;
         engagement.released_amount += payment;
@@ -1207,12 +1471,13 @@ impl HireSettleContract {
             let tiered_bps = Self::engagement_tier_bps(
                 &env,
                 &engagement_id,
-                platform_fee.bps,
+                Self::token_base_bps(&env, &engagement.token, platform_fee.bps),
                 engagement.total_amount,
             );
             Self::apply_referral_discount(&env, tiered_bps, &engagement.referrer)
         };
-        let platform_fee_amount = (payment * effective_bps as i128) / 10_000;
+        let platform_fee_amount =
+            Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
         let net_payment = payment - platform_fee_amount;
 
         let token_client = token::Client::new(&env, &engagement.token);
@@ -1616,10 +1881,11 @@ impl HireSettleContract {
         let effective_bps = Self::effective_platform_fee_bps(
             &env,
             &engagement_id,
-            platform_fee.bps,
+            Self::token_base_bps(&env, &engagement.token, platform_fee.bps),
             engagement.total_amount,
         );
-        let fee_amount = (payment * effective_bps as i128) / 10_000;
+        let fee_amount =
+                Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
         let net_payment = payment - fee_amount;
         engagement.released_amount += payment;
 
