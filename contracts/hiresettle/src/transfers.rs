@@ -426,4 +426,181 @@ impl HireSettleContract {
     // ADMIN ARBITER REPLACEMENT (issue #245)
     // ----------------------------------------------------------
 
+    // ----------------------------------------------------------
+    // ISSUE #507 — ADMIN ARBITER PANEL RESIZE
+    // ----------------------------------------------------------
+
+    /// Admin grows an engagement's arbiter panel by appending `new_arbiter`
+    /// as a new slot. Quorum stays as it is unless `new_quorum` is given.
+    /// On a weighted panel (issue #460) the new slot has weight 1, and quorum
+    /// is measured in weight as usual.
+    ///
+    /// Allowed while the engagement is quarantined, like other admin panel
+    /// repairs, but never while any milestone is `Disputed`, so a panel
+    /// cannot change mid-vote.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` / `"NoAdmin"` — caller is not the admin.
+    /// - `"engagement not found"` / `"engagement is in a terminal state"`.
+    /// - `"PanelChangeDuringDispute"` — a milestone is currently `Disputed`.
+    /// - `"DuplicateArbiter"` — `new_arbiter` is already on the panel.
+    /// - `"CompanyArbiterCollision"` / `"RecruiterArbiterCollision"` —
+    ///   `new_arbiter` is the company or the recruiter.
+    /// - `"invalid quorum"` — `new_quorum` is 0 or exceeds the new panel's
+    ///   total weight.
+    ///
+    /// # Events
+    /// Emits `("arbiter_added", engagement_id)` with `(new_arbiter, quorum)`.
+    pub fn admin_add_arbiter(
+        env: Env,
+        admin: Address,
+        engagement_id: String,
+        new_arbiter: Address,
+        new_quorum: Option<u32>,
+    ) {
+        Self::assert_admin(&env, &admin);
+        let mut engagement = Self::get_engagement_for_panel_change(&env, &engagement_id);
+
+        if engagement.arbiters.contains(&new_arbiter) {
+            panic!("DuplicateArbiter");
+        }
+        if new_arbiter == engagement.company {
+            panic!("CompanyArbiterCollision");
+        }
+        if new_arbiter == engagement.recruiter {
+            panic!("RecruiterArbiterCollision");
+        }
+
+        engagement.arbiters.push_back(new_arbiter.clone());
+        if let Some(weights) = engagement.arbiter_weights.as_mut() {
+            weights.push_back(1);
+        }
+        if let Some(q) = new_quorum {
+            Self::assert_panel_quorum_valid(&engagement, q);
+            engagement.quorum = q;
+        }
+
+        // As in `claim_arbiter`: a delegation to an address that is now an
+        // arbiter could never be used, since its votes resolve to its own slot.
+        for i in 0..engagement.arbiters.len() {
+            let key = DataKey2::ArbiterVoteDelegate(
+                engagement_id.clone(),
+                engagement.arbiters.get(i).unwrap(),
+            );
+            let delegate: Option<Address> = env.storage().persistent().get(&key);
+            if delegate.as_ref() == Some(&new_arbiter) {
+                env.storage().persistent().remove(&key);
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+
+        env.events().publish(
+            (Symbol::new(&env, "arbiter_added"), engagement_id),
+            (new_arbiter, engagement.quorum),
+        );
+    }
+
+    /// Admin shrinks an engagement's arbiter panel by removing `arbiter`'s
+    /// slot (and its weight, on a weighted panel). If the current quorum
+    /// would exceed what the remaining panel can reach, the call panics
+    /// unless `new_quorum` supplies a reachable one; `new_quorum` may also
+    /// lower quorum when it would still be reachable.
+    ///
+    /// Clears the removed arbiter's vote delegation and any pending
+    /// succession nomination it made. Same quarantine and dispute rules as
+    /// [`Self::admin_add_arbiter`].
+    ///
+    /// # Panics
+    /// - `"unauthorized"` / `"NoAdmin"` — caller is not the admin.
+    /// - `"engagement not found"` / `"engagement is in a terminal state"`.
+    /// - `"PanelChangeDuringDispute"` — a milestone is currently `Disputed`.
+    /// - `"ArbiterNotFound"` — `arbiter` is not on the panel.
+    /// - `"at least one arbiter required"` — `arbiter` is the last one.
+    /// - `"QuorumUnreachable"` — no `new_quorum` given and the current quorum
+    ///   exceeds the remaining panel's total weight.
+    /// - `"invalid quorum"` — `new_quorum` is 0 or exceeds the remaining
+    ///   panel's total weight.
+    ///
+    /// # Events
+    /// Emits `("arbiter_removed", engagement_id)` with `(arbiter, quorum)`.
+    pub fn admin_remove_arbiter(
+        env: Env,
+        admin: Address,
+        engagement_id: String,
+        arbiter: Address,
+        new_quorum: Option<u32>,
+    ) {
+        Self::assert_admin(&env, &admin);
+        let mut engagement = Self::get_engagement_for_panel_change(&env, &engagement_id);
+
+        let slot = engagement
+            .arbiters
+            .first_index_of(&arbiter)
+            .unwrap_or_else(|| panic!("ArbiterNotFound"));
+        if engagement.arbiters.len() == 1 {
+            panic!("at least one arbiter required");
+        }
+
+        engagement.arbiters.remove(slot);
+        if let Some(weights) = engagement.arbiter_weights.as_mut() {
+            weights.remove(slot);
+        }
+        match new_quorum {
+            Some(q) => {
+                Self::assert_panel_quorum_valid(&engagement, q);
+                engagement.quorum = q;
+            }
+            None => {
+                if engagement.quorum > Self::total_arbiter_weight(&engagement) {
+                    panic!("QuorumUnreachable");
+                }
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey2::ArbiterVoteDelegate(engagement_id.clone(), arbiter.clone()));
+        let nomination_key = DataKey::PendingArbiter(engagement_id.clone());
+        let nomination: Option<ArbiterNomination> = env.storage().persistent().get(&nomination_key);
+        if nomination.is_some_and(|n| n.current == arbiter) {
+            env.storage().persistent().remove(&nomination_key);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+
+        env.events().publish(
+            (Symbol::new(&env, "arbiter_removed"), engagement_id),
+            (arbiter, engagement.quorum),
+        );
+    }
+
+    /// Load an engagement whose panel is about to be resized, rejecting
+    /// terminal engagements and ones with a dispute in progress.
+    fn get_engagement_for_panel_change(env: &Env, engagement_id: &String) -> Engagement {
+        let engagement = Self::get_engagement_internal(env, engagement_id);
+        if Self::is_terminal_status(&engagement.status) {
+            panic!("engagement is in a terminal state");
+        }
+        let disputed = (0..engagement.milestones.len())
+            .any(|i| engagement.milestones.get(i).unwrap().status == MilestoneStatus::Disputed);
+        if disputed {
+            panic!("PanelChangeDuringDispute");
+        }
+        engagement
+    }
+
+    /// Panics `"invalid quorum"` unless `quorum` is reachable by the panel:
+    /// at least 1 and at most its total weight (its size when unweighted).
+    fn assert_panel_quorum_valid(engagement: &Engagement, quorum: u32) {
+        if quorum == 0 || quorum > Self::total_arbiter_weight(engagement) {
+            panic!("invalid quorum");
+        }
+    }
 }

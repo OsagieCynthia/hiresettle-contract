@@ -373,6 +373,12 @@ impl HireSettleContract {
         if let Some(bond_amount) = config.recruiter_bond_amount {
             Self::escrow_recruiter_bond(&env, &engagement_id, &recruiter, &token, bond_amount);
         }
+        // Issue #506: the co-recruiter's bond, only when there is a co-recruiter.
+        if let (Some(co_recruiter), Some(bond_amount)) =
+            (&config.co_recruiter, config.co_recruiter_bond_amount)
+        {
+            Self::escrow_co_recruiter_bond(&env, &engagement_id, co_recruiter, &token, bond_amount);
+        }
 
         let engagement = Engagement {
             id: engagement_id.clone(),
@@ -404,6 +410,18 @@ impl HireSettleContract {
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
 
         Self::extend_engagement_ttl(&env, &engagement_id);
+
+        // Issue #505: freeze the tier-resolved rate (or the base rate when no
+        // tier matches) so later `set_fee_tiers` calls cannot change it.
+        if config.snapshot_fee_tier {
+            let base_bps = Self::get_platform_fee_internal(&env).bps;
+            let bps = Self::resolve_platform_fee_bps(&env, base_bps, total_amount);
+            let key = DataKey2::FeeTierSnapshot(engagement_id.clone());
+            env.storage().persistent().set(&key, &bps);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, 100_000, 6_300_000);
+        }
 
         // Increment per-company active engagement count.
         let new_active = active_count + 1;
@@ -682,6 +700,8 @@ impl HireSettleContract {
             &DataKey::ReplacementCount(engagement_id.clone()),
             &(replacement_index + 1),
         );
+        // Issue #501: who asked and when, for the engagement timeline.
+        Self::record_replacement(&env, &engagement_id, replacement_index, &company);
 
         Self::extend_engagement_ttl(&env, &engagement_id);
         Self::emit_engagement_status_changed(
@@ -689,6 +709,7 @@ impl HireSettleContract {
             &engagement_id,
             old_engagement_status,
             engagement.status.clone(),
+            Some(company.clone()),
         );
 
         env.events().publish(
@@ -837,10 +858,11 @@ impl HireSettleContract {
             &engagement_id,
             old_engagement_status,
             engagement.status.clone(),
+            Some(company.clone()),
         );
 
         Self::decrement_company_active_count(&env, &engagement.company);
-        Self::settle_recruiter_bond(&env, &engagement);
+        Self::settle_bonds(&env, &engagement);
 
         env.events().publish(
             (
@@ -918,6 +940,7 @@ impl HireSettleContract {
     /// - `"no co_recruiter"` — engagement has no co-recruiter
     /// - `"InvalidSplitBps"` — `new_split_bps > 10_000`
     /// - `"unauthorized"` — caller is neither recruiter nor co-recruiter
+    /// - `"AmendmentCooldownActive"` — proposer is in cooldown after a recent rejection (issue #496)
     pub fn propose_split_amendment(
         env: Env,
         proposer: Address,
@@ -948,6 +971,18 @@ impl HireSettleContract {
         } else {
             panic!("{}", ERR_UNAUTHORIZED);
         };
+
+        // Issue #496: Check amendment reproposal cooldown
+        let cooldown = Self::get_amendment_reprop_cooldown(env.clone());
+        if cooldown > 0 {
+            let rejection_key = DataKey2::SplitAmendmentRejectedAt(engagement_id.clone(), proposer.clone());
+            if let Some(rejected_at) = env.storage().persistent().get::<_, u32>(&rejection_key) {
+                let current_ledger = env.ledger().sequence();
+                if current_ledger < rejected_at.saturating_add(cooldown) {
+                    panic!("AmendmentCooldownActive");
+                }
+            }
+        }
 
         let ttl = Self::get_amendment_ttl(env.clone());
         let now = env.ledger().sequence();
@@ -1033,6 +1068,7 @@ impl HireSettleContract {
     }
 
     /// Counterparty rejects a pending split amendment without changing the split.
+    /// Records the rejection time for cooldown tracking (issue #496).
     pub fn reject_split_amendment(env: Env, rejector: Address, engagement_id: String) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
@@ -1053,6 +1089,15 @@ impl HireSettleContract {
 
         Self::assert_split_amendment_counterparty(&engagement, &rejector, &proposal);
         env.storage().persistent().remove(&key);
+
+        // Issue #496: Record the rejection ledger for the proposer on this engagement
+        let rejection_key = DataKey2::SplitAmendmentRejectedAt(engagement_id.clone(), proposal.proposer.clone());
+        env.storage()
+            .persistent()
+            .set(&rejection_key, &env.ledger().sequence());
+        env.storage()
+            .persistent()
+            .extend_ttl(&rejection_key, 100_000, 6_300_000);
 
         env.events().publish(
             (

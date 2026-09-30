@@ -49,6 +49,10 @@ pub(crate) const DISPUTE_WINDOW_PROPOSAL_TTL_LEDGERS: u32 = 17_280;
 pub(crate) const DEFAULT_AMENDMENT_TTL_LEDGERS: u32 = 17_280;
 /// FIFO cap on per-engagement split amendment log entries (issue #471).
 pub(crate) const MAX_AMENDMENT_LOG_ENTRIES: u32 = 20;
+/// FIFO cap on per-engagement dispute history entries (issue #501).
+pub(crate) const MAX_DISPUTE_HISTORY_ENTRIES: u32 = 50;
+/// FIFO cap on per-engagement status history entries (issue #501).
+pub(crate) const MAX_STATUS_HISTORY_ENTRIES: u32 = 50;
 
 /// Minimum stars accepted by `rate_recruiter` (issue #470).
 pub(crate) const MIN_RATING_STARS: u32 = 1;
