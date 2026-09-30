@@ -371,5 +371,14 @@ pub enum DataKey2 {
     FeeTierSnapshot(String),
     /// Co-recruiter collateral bond for an engagement (issue #506).
     CoRecruiterBond(String),
+    /// Minimum absolute platform fee per fee-bearing payout (issue #478).
+    PlatformFeeFloor,
+    /// Per-token base platform-fee bps override (issue #479).
+    TokenPlatformFee(Address),
+    /// Admin-tunable weights for `get_engagement_risk_score` (issue #480).
+    RiskScoreWeights,
+    /// Granted extension count for an (engagement_id, milestone_index)
+    /// (issue #480); contributes to the engagement risk score.
+    MilestoneExtensionCount(String, u32),
 }
 
