@@ -174,3 +174,8 @@ pub(crate) const ERR_INVALID_MILESTONE_INDEX: &str = "invalid milestone index";
 /// via `pause_engagement` (issue #239). Distinct from `"ContractPaused"` so
 /// off-chain callers can tell a single-engagement freeze from a global halt.
 pub(crate) const ERR_ENGAGEMENT_PAUSED: &str = "EngagementPaused";
+/// Raised when an operation targets a single milestone the admin has frozen
+/// via `hold_milestone` (issue #492). Distinct from `"EngagementPaused"` so
+/// callers can tell a one-milestone compliance hold from an engagement-wide
+/// quarantine.
+pub(crate) const ERR_MILESTONE_ON_HOLD: &str = "MilestoneOnHold";

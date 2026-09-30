@@ -371,5 +371,8 @@ pub enum DataKey2 {
     FeeTierSnapshot(String),
     /// Co-recruiter collateral bond for an engagement (issue #506).
     CoRecruiterBond(String),
+    /// Compliance-hold reason for (engagement_id, milestone_index) (issue #492).
+    /// Present ⇒ the milestone is on hold; absent ⇒ not held.
+    MilestoneHold(String, u32),
 }
 
