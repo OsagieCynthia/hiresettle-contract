@@ -131,6 +131,9 @@ pub enum ConfigKey {
     FeeRebateBps,
     /// Emergency pause vote window in ledgers (issue #474).
     EmergencyVoteWindow,
+    /// Minimum quorum-to-panel-size ratio, in basis points, enforced by
+    /// `create_engagement` (issue #502). Default 0 (no minimum).
+    MinQuorumRatioBps,
 }
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.

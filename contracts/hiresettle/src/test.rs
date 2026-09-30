@@ -10037,3 +10037,241 @@ fn test_create_engagement_duplicate_id_rejected() {
         &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DUP",
     );
 }
+
+// ============================================================
+// ISSUE #502 — MINIMUM QUORUM RATIO AT create_engagement
+// ============================================================
+
+/// Create an engagement with `panel_size` fresh arbiters and the given
+/// `quorum` / optional `weights`, returning the engagement id.
+fn create_engagement_with_panel(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    id: &str,
+    panel_size: u32,
+    quorum: u32,
+    weights: Option<Vec<u32>>,
+) -> String {
+    let mut arbiters = Vec::new(env);
+    for _ in 0..panel_size {
+        arbiters.push_back(Address::generate(env));
+    }
+    client.create_engagement(
+        &String::from_str(env, id),
+        company,
+        recruiter,
+        &ArbiterSetup {
+            arbiters,
+            quorum,
+            weights,
+        },
+        token_id,
+        &1_000_000_000,
+        &String::from_str(env, "Senior Engineer"),
+        &build_milestones(env),
+        &vec![env, 30u32, 90u32],
+        &default_config(),
+    )
+}
+
+#[test]
+fn test_min_quorum_ratio_defaults_to_zero() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    assert_eq!(client.get_min_quorum_ratio_bps(), 0);
+}
+
+#[test]
+fn test_min_quorum_ratio_default_allows_single_arbiter_quorum_on_large_panel() {
+    // Regression: with the default ratio of 0, today's behaviour is unchanged —
+    // quorum 1 on a 7-arbiter panel is still accepted.
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let id = create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-DEFAULT", 7, 1, None,
+    );
+    assert_eq!(client.get_engagement(&id).quorum, 1);
+}
+
+#[test]
+#[should_panic(expected = "invalid quorum")]
+fn test_min_quorum_ratio_default_still_rejects_zero_quorum() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-ZERO", 3, 0, None,
+    );
+}
+
+#[test]
+#[should_panic(expected = "invalid quorum")]
+fn test_min_quorum_ratio_default_still_rejects_quorum_above_panel() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-OVER", 3, 4, None,
+    );
+}
+
+#[test]
+fn test_set_min_quorum_ratio_bps_stores_value_and_emits_event() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_min_quorum_ratio_bps(&company, &5_000);
+    assert_eq!(client.get_min_quorum_ratio_bps(), 5_000);
+    assert!(has_event(&env, "min_quorum_ratio_set"));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_set_min_quorum_ratio_bps_rejects_non_admin() {
+    let (env, contract_id, _token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&recruiter, &5_000);
+}
+
+#[test]
+#[should_panic(expected = "InvalidQuorumRatio")]
+fn test_set_min_quorum_ratio_bps_rejects_above_10000() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&company, &10_001);
+}
+
+#[test]
+#[should_panic(expected = "QuorumBelowMinRatio")]
+fn test_min_quorum_ratio_rejects_quorum_below_fraction() {
+    // 50 % of a 6-arbiter panel requires quorum >= 3; quorum 2 must fail.
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&company, &5_000);
+    create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-LOW", 6, 2, None,
+    );
+}
+
+#[test]
+fn test_min_quorum_ratio_accepts_minimum_passing_quorum() {
+    // 50 % of a 6-arbiter panel: exactly 3 is the minimum passing quorum.
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&company, &5_000);
+    let id = create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-MIN", 6, 3, None,
+    );
+    assert_eq!(client.get_engagement(&id).quorum, 3);
+}
+
+#[test]
+#[should_panic(expected = "QuorumBelowMinRatio")]
+fn test_min_quorum_ratio_odd_panel_rounds_up_rejects_floor() {
+    // Rounding rule: required quorum = ceil(N * bps / 10_000).
+    // 50 % of 5 = 2.5 → 3, so quorum 2 (the floor) must be rejected.
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&company, &5_000);
+    create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-ODD-LOW", 5, 2, None,
+    );
+}
+
+#[test]
+fn test_min_quorum_ratio_odd_panel_rounds_up_accepts_ceiling() {
+    // 50 % of 5 = 2.5 → 3 is the minimum passing quorum.
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&company, &5_000);
+    let id = create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-ODD-OK", 5, 3, None,
+    );
+    assert_eq!(client.get_engagement(&id).quorum, 3);
+}
+
+#[test]
+fn test_min_quorum_ratio_non_round_ratio_boundary() {
+    // 6 667 bps of 3 = 2.0001 → ceil = 3, so a 3-arbiter panel needs
+    // unanimity; 6 666 bps of 3 = 1.9998 → ceil = 2.
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_min_quorum_ratio_bps(&company, &6_666);
+    create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-6666", 3, 2, None,
+    );
+
+    client.set_min_quorum_ratio_bps(&company, &6_667);
+    let result = client.try_create_engagement(
+        &String::from_str(&env, "ENG-Q-6667"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![
+                &env,
+                Address::generate(&env),
+                Address::generate(&env),
+                Address::generate(&env),
+            ],
+            quorum: 2,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Senior Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_min_quorum_ratio_full_requires_unanimity() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&company, &10_000);
+
+    let id = create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-UNAN", 4, 4, None,
+    );
+    assert_eq!(client.get_engagement(&id).quorum, 4);
+}
+
+#[test]
+#[should_panic(expected = "QuorumBelowMinRatio")]
+fn test_min_quorum_ratio_weighted_panel_uses_total_weight() {
+    // Weighted panel: weights [3, 1, 1] → total weight 5. At 50 % the
+    // required quorum is ceil(2.5) = 3 in weight units, so quorum 2 fails
+    // even though it is >= half the headcount (3 arbiters → 1.5).
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&company, &5_000);
+    create_engagement_with_panel(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        "ENG-Q-WEIGHT",
+        3,
+        2,
+        Some(vec![&env, 3u32, 1u32, 1u32]),
+    );
+}
+
+#[test]
+fn test_min_quorum_ratio_reset_to_zero_restores_default_behaviour() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_min_quorum_ratio_bps(&company, &5_000);
+    client.set_min_quorum_ratio_bps(&company, &0);
+    let id = create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-RESET", 7, 1, None,
+    );
+    assert_eq!(client.get_engagement(&id).quorum, 1);
+}

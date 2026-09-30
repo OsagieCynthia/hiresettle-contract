@@ -3,6 +3,9 @@
 pub(crate) const MAX_PLATFORM_FEE_BPS: u32 = 500;
 pub(crate) const MAX_ARBITER_FEE_BPS: u32 = 200;
 pub(crate) const FULL_SPLIT_BPS: u32 = 10_000;
+/// Upper bound for `set_min_quorum_ratio_bps` (issue #502): 10 000 bps
+/// (100 %) forces a unanimous panel.
+pub(crate) const MAX_MIN_QUORUM_RATIO_BPS: u32 = 10_000;
 
 pub(crate) const LEDGERS_PER_DAY: u32 = 17_280; // 86 400s ÷ 5s per ledger
 pub(crate) const DEFAULT_PROOF_COOLDOWN: u32 = 2_880; // ~4 hours
