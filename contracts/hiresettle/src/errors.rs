@@ -93,6 +93,7 @@
 //! | `InvalidMinAmount` | — | `admin::set_token_min_amount` | 1 |
 //! | `InvalidPrerequisiteIndex` | — | `helpers::validate_milestone_prerequisites` | 1 |
 //! | `InvalidProofHash` | — | `milestones::submit_proof` | 1 |
+//! | `InvalidQuorumRatio` | — | `admin::set_min_quorum_ratio_bps` | 1 |
 //! | `InvalidRating` | — | `ratings::rate_recruiter` | 1 |
 //! | `InvalidSplitBps` | — | `engagement::create_engagement_impl`, `engagement::propose_split_amendment` | 2 |
 //! | `InvalidSplitPercent` | — | `disputes::cast_arbiter_split_vote` | 1 |
@@ -136,9 +137,9 @@
 //! | `PrerequisiteCycle` | — | `helpers::validate_milestone_prerequisites` | 1 |
 //! | `PreviousMilestoneNotComplete` | — | `helpers::assert_prerequisites_complete`, `milestones::batch_confirm_milestones` | 2 |
 //! | `ProofHashTooLong` | — | `milestones::submit_proof` | 1 |
-//! | `QuorumUnreachable` | — | `transfers::admin_remove_arbiter` | 1 |
-//! | `ReasonTooLong` | — | `disputes::batch_raise_dispute`, `disputes::raise_dispute` | 2 |
-//! | `RecruiterArbiterCollision` | — | `engagement::create_engagement_impl`, `transfers::admin_add_arbiter` | 2 |
+//! | `QuorumBelowMinRatio` | — | `engagement::create_engagement_impl` | 1 |
+//! | `ReasonTooLong` | — | `disputes::raise_dispute` | 1 |
+//! | `RecruiterArbiterCollision` | — | `engagement::create_engagement_impl` | 1 |
 //! | `referrer already exists` | — | `admin::add_referrer` | 1 |
 //! | `referrer not found` | — | `admin::remove_referrer` | 1 |
 //! | `replacement reason too long` | — | `engagement::request_replacement` | 1 |
