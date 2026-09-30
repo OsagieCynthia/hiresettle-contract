@@ -152,6 +152,11 @@ pub enum ConfigKey {
     /// Grace period in ledgers before the same proposer may re-propose on the
     /// same milestone after a rejection (issue #496, default 0 for no cooldown).
     AmendmentReproposalCooldown,
+    /// Maximum dispute cycles per milestone (issue #481). Absent ⇒ unlimited.
+    MaxDisputeCycles,
+    /// Admin-wide cap on a recruiter's active engagements (issue #482).
+    /// Absent or `0` ⇒ unlimited.
+    MaxActivePerRecruiter,
 }
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.
@@ -371,5 +376,14 @@ pub enum DataKey2 {
     FeeTierSnapshot(String),
     /// Co-recruiter collateral bond for an engagement (issue #506).
     CoRecruiterBond(String),
+    /// Number of disputes raised on (engagement_id, milestone_index) (issue #481).
+    DisputeCycles(String, u32),
+    /// Recruiter's self-imposed active engagement cap (issue #482).
+    RecruiterActiveCap(Address),
+    /// Super arbiter panel `(members, quorum)` (issue #483). Mutually
+    /// exclusive with `DataKey::SuperArbiter`.
+    SuperArbiterPanel,
+    /// Panel votes on an escalated dispute: `(approvers, rejecters)` (issue #483).
+    SuperArbiterVotes(String, u32),
 }
 
