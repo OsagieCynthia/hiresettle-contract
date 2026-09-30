@@ -10983,3 +10983,438 @@ fn test_admin_remove_arbiter_clears_its_nomination_and_delegate() {
     let result = client.try_claim_arbiter(&Address::generate(&env), &eng_id);
     assert!(result.is_err());
 }
+
+// ============================================================
+// ISSUE #492 — MILESTONE COMPLIANCE HOLD
+// ============================================================
+
+/// Standard engagement with milestone 0's proof submitted, ready to confirm.
+fn setup_hold_engagement(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    arbiter: &Address,
+    id: &str,
+) -> String {
+    let eng_id = String::from_str(env, id);
+    create_standard_engagement(env, client, token_id, company, recruiter, arbiter, id);
+    client.submit_proof(recruiter, &eng_id, &0, &String::from_str(env, "ipfs://offer"));
+    eng_id
+}
+
+// --- admin API & queries ---
+
+#[test]
+fn test_hold_milestone_sets_flag_reason_and_event() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-SET",
+    );
+
+    assert!(!client.is_milestone_on_hold(&eng_id, &0));
+    assert_eq!(client.get_milestone_hold_reason(&eng_id, &0), None);
+
+    let reason = String::from_str(&env, "legal review of offer letter");
+    client.hold_milestone(&company, &eng_id, &0, &reason);
+
+    assert!(has_event(&env, "milestone_held"));
+    assert!(client.is_milestone_on_hold(&eng_id, &0));
+    assert_eq!(client.get_milestone_hold_reason(&eng_id, &0), Some(reason));
+    // Sibling milestones are not held.
+    assert!(!client.is_milestone_on_hold(&eng_id, &1));
+    // A hold is not an engagement-wide pause.
+    assert!(!client.is_engagement_paused(&eng_id));
+}
+
+#[test]
+fn test_hold_milestone_rehold_overwrites_reason() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-RE",
+    );
+
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "first"));
+    let second = String::from_str(&env, "second");
+    client.hold_milestone(&company, &eng_id, &0, &second);
+    assert_eq!(client.get_milestone_hold_reason(&eng_id, &0), Some(second));
+}
+
+#[test]
+fn test_release_milestone_hold_clears_flag_and_reason() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-REL",
+    );
+
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    client.release_milestone_hold(&company, &eng_id, &0);
+
+    assert!(has_event(&env, "milestone_hold_released"));
+    assert!(!client.is_milestone_on_hold(&eng_id, &0));
+    assert_eq!(client.get_milestone_hold_reason(&eng_id, &0), None);
+}
+
+#[test]
+fn test_release_milestone_hold_when_not_held_is_noop() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-NOOP",
+    );
+
+    client.release_milestone_hold(&company, &eng_id, &0);
+    assert!(!client.is_milestone_on_hold(&eng_id, &0));
+    client.confirm_milestone(&company, &eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_hold_milestone_non_admin_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-AUTH",
+    );
+    client.hold_milestone(&recruiter, &eng_id, &0, &String::from_str(&env, "review"));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_release_milestone_hold_non_admin_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-RAUTH",
+    );
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    client.release_milestone_hold(&recruiter, &eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "EmptyHoldReason")]
+fn test_hold_milestone_empty_reason_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-EMPTY",
+    );
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, ""));
+}
+
+#[test]
+#[should_panic(expected = "HoldReasonTooLong")]
+fn test_hold_milestone_reason_too_long_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-LONG",
+    );
+    let long = "r".repeat(129);
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, &long));
+}
+
+#[test]
+#[should_panic(expected = "invalid milestone index")]
+fn test_hold_milestone_invalid_index_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-IDX",
+    );
+    client.hold_milestone(&company, &eng_id, &9, &String::from_str(&env, "review"));
+}
+
+#[test]
+#[should_panic(expected = "engagement not found")]
+fn test_hold_milestone_unknown_engagement_rejected() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.hold_milestone(
+        &company,
+        &String::from_str(&env, "ENG-NOPE"),
+        &0,
+        &String::from_str(&env, "review"),
+    );
+}
+
+// --- held milestone blocks its own state-changing calls ---
+
+#[test]
+#[should_panic(expected = "MilestoneOnHold")]
+fn test_hold_blocks_submit_proof() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-HOLD-SUB");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-SUB",
+    );
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+}
+
+#[test]
+#[should_panic(expected = "MilestoneOnHold")]
+fn test_hold_blocks_confirm_milestone() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-CONF",
+    );
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    client.confirm_milestone(&company, &eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "MilestoneOnHold")]
+fn test_hold_blocks_raise_dispute() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-DISP",
+    );
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "bad proof"));
+}
+
+#[test]
+#[should_panic(expected = "MilestoneOnHold")]
+fn test_hold_blocks_arbiter_vote_on_open_dispute() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-VOTE",
+    );
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "bad proof"));
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &true);
+}
+
+#[test]
+#[should_panic(expected = "MilestoneOnHold")]
+fn test_hold_blocks_unlock_milestone() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-UNL",
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+    client.hold_milestone(&company, &eng_id, &1, &String::from_str(&env, "review"));
+    advance_ledger(&env, 31 * 17_280);
+    client.unlock_milestone(&eng_id, &1);
+}
+
+#[test]
+#[should_panic(expected = "MilestoneOnHold")]
+fn test_hold_blocks_force_confirm() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-FORCE",
+    );
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    client.force_confirm_milestone(&company, &eng_id, &0);
+}
+
+// --- siblings stay operational; release restores ---
+
+#[test]
+fn test_hold_leaves_sibling_milestones_operational() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-SIB",
+    );
+
+    // Hold the 30-day retention milestone; the placement milestone in the
+    // same engagement still confirms normally.
+    client.hold_milestone(&company, &eng_id, &1, &String::from_str(&env, "review"));
+
+    client.confirm_milestone(&company, &eng_id, &0);
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Confirmed);
+
+    advance_ledger(&env, 91 * 17_280);
+    let result = client.try_unlock_milestone(&eng_id, &1);
+    assert!(result.is_err());
+    assert_eq!(client.get_milestone(&eng_id, &1).status, MilestoneStatus::Locked);
+}
+
+#[test]
+fn test_release_milestone_hold_restores_normal_operation() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HOLD-RST",
+    );
+
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    assert!(client.try_confirm_milestone(&company, &eng_id, &0).is_err());
+
+    client.release_milestone_hold(&company, &eng_id, &0);
+    client.confirm_milestone(&company, &eng_id, &0);
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Confirmed);
+}
+
+#[test]
+fn test_hold_rejects_whole_batch_confirm() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Two independent placement milestones, both ProofSubmitted.
+    let mut milestones = Vec::new(&env);
+    for name in ["Hold Deliverable A", "Hold Deliverable B"] {
+        milestones.push_back(Milestone {
+            name: String::from_str(&env, name),
+            payment_percent: 50,
+            kind: MilestoneKind::Placement,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Pending,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
+        });
+    }
+    let eng_id = client.create_engagement(
+        &String::from_str(&env, "ENG-HOLD-BATCH"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Senior Engineer"),
+        &milestones,
+        &Vec::new(&env),
+        &default_config(),
+    );
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://hold-a"));
+    client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://hold-b"));
+
+    client.hold_milestone(&company, &eng_id, &1, &String::from_str(&env, "review"));
+
+    let result = client.try_batch_confirm_milestones(&company, &eng_id, &vec![&env, 0u32, 1u32]);
+    assert!(result.is_err());
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::ProofSubmitted);
+    assert_eq!(client.get_milestone(&eng_id, &1).status, MilestoneStatus::ProofSubmitted);
+
+    // The unheld milestone alone still confirms.
+    client.batch_confirm_milestones(&company, &eng_id, &vec![&env, 0u32]);
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Confirmed);
+}
+
+// --- global × engagement × milestone guard matrix (mirrors #457) ---
+
+#[test]
+#[should_panic(expected = "EngagementPaused")]
+fn test_hold_matrix_engagement_and_milestone_engagement_error_first() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HM-EM",
+    );
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    client.pause_engagement(&company, &eng_id, &String::from_str(&env, "quarantine"));
+    client.confirm_milestone(&company, &eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "ContractPaused")]
+fn test_hold_matrix_global_and_milestone_global_error_first() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HM-GM",
+    );
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    client.pause(&company);
+    client.confirm_milestone(&company, &eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "ContractPaused")]
+fn test_hold_matrix_all_three_global_error_first() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HM-ALL",
+    );
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    client.pause_engagement(&company, &eng_id, &String::from_str(&env, "quarantine"));
+    client.pause(&company);
+    client.confirm_milestone(&company, &eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "MilestoneOnHold")]
+fn test_hold_matrix_unpause_engagement_does_not_release_hold() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HM-UE",
+    );
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    client.pause_engagement(&company, &eng_id, &String::from_str(&env, "quarantine"));
+    client.unpause_engagement(&company, &eng_id);
+    assert!(!client.is_engagement_paused(&eng_id));
+    assert!(client.is_milestone_on_hold(&eng_id, &0));
+    client.confirm_milestone(&company, &eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "MilestoneOnHold")]
+fn test_hold_matrix_global_unpause_does_not_release_hold() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HM-UG",
+    );
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    client.pause(&company);
+    client.unpause(&company);
+    assert!(!client.is_paused());
+    assert!(client.is_milestone_on_hold(&eng_id, &0));
+    client.confirm_milestone(&company, &eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "EngagementPaused")]
+fn test_hold_matrix_release_hold_does_not_unpause_engagement() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HM-RH",
+    );
+    client.pause_engagement(&company, &eng_id, &String::from_str(&env, "quarantine"));
+    // Hold / release stay available to the admin during quarantine.
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    client.release_milestone_hold(&company, &eng_id, &0);
+    assert!(client.is_engagement_paused(&eng_id));
+    client.confirm_milestone(&company, &eng_id, &0);
+}
+
+#[test]
+fn test_hold_matrix_all_lifted_confirm_succeeds() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = setup_hold_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HM-OK",
+    );
+    client.hold_milestone(&company, &eng_id, &0, &String::from_str(&env, "review"));
+    client.pause_engagement(&company, &eng_id, &String::from_str(&env, "quarantine"));
+    client.pause(&company);
+
+    client.unpause(&company);
+    client.unpause_engagement(&company, &eng_id);
+    client.release_milestone_hold(&company, &eng_id, &0);
+
+    client.confirm_milestone(&company, &eng_id, &0);
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Confirmed);
+}
