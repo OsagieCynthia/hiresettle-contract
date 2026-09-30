@@ -10983,3 +10983,330 @@ fn test_admin_remove_arbiter_clears_its_nomination_and_delegate() {
     let result = client.try_claim_arbiter(&Address::generate(&env), &eng_id);
     assert!(result.is_err());
 }
+
+// ============================================================
+// ISSUE #498 — BATCH RAISE DISPUTE
+// ============================================================
+
+/// Three independent placement milestones (no prerequisites) so all of them
+/// can sit in `ProofSubmitted` at once.
+fn build_parallel_milestones(env: &Env) -> Vec<Milestone> {
+    let mut milestones = Vec::new(env);
+    for (name, pct) in [("Deliverable A", 30u32), ("Deliverable B", 30), ("Deliverable C", 40)] {
+        milestones.push_back(Milestone {
+            name: String::from_str(env, name),
+            payment_percent: pct,
+            kind: MilestoneKind::Placement,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(env, ""),
+            status: MilestoneStatus::Pending,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: Vec::new(env),
+        });
+    }
+    milestones
+}
+
+fn create_parallel_engagement(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    arbiter: &Address,
+    id: &str,
+) -> String {
+    client.create_engagement(
+        &String::from_str(env, id),
+        company,
+        recruiter,
+        &ArbiterSetup {
+            arbiters: vec![env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        token_id,
+        &1_000_000_000,
+        &String::from_str(env, "Senior Engineer"),
+        &build_parallel_milestones(env),
+        &Vec::new(env),
+        &default_config(),
+    )
+}
+
+/// Submit a distinct proof hash for `index` (proof hashes must be unique).
+fn submit_parallel_proof(
+    env: &Env,
+    client: &HireSettleContractClient,
+    recruiter: &Address,
+    eng_id: &String,
+    index: u32,
+    tag: &str,
+) {
+    let hashes = ["ipfs://p0", "ipfs://p1", "ipfs://p2"];
+    let alt = ["ipfs://q0", "ipfs://q1", "ipfs://q2"];
+    let hash = if tag == "q" { alt[index as usize] } else { hashes[index as usize] };
+    client.submit_proof(recruiter, eng_id, &index, &String::from_str(env, hash));
+}
+
+fn count_events(env: &Env, event_name: &str) -> u32 {
+    let expected = Symbol::new(env, event_name);
+    let mut n = 0;
+    for (_, topics, _) in env.events().all().iter() {
+        let matches = topics
+            .get(0)
+            .and_then(|v| v.try_into_val(env).ok())
+            .map(|s: Symbol| s == expected)
+            .unwrap_or(false);
+        if matches {
+            n += 1;
+        }
+    }
+    n
+}
+
+#[test]
+fn test_batch_raise_dispute_disputes_all_listed_milestones() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-ALL",
+    );
+    for i in 0..3u32 {
+        submit_parallel_proof(&env, &client, &recruiter, &eng_id, i, "p");
+    }
+
+    let reason = String::from_str(&env, "same flawed evidence");
+    client.batch_raise_dispute(&company, &eng_id, &vec![&env, 0u32, 2u32], &reason);
+
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Disputed);
+    assert_eq!(client.get_milestone(&eng_id, &1).status, MilestoneStatus::ProofSubmitted);
+    assert_eq!(client.get_milestone(&eng_id, &2).status, MilestoneStatus::Disputed);
+    assert_eq!(client.get_dispute_reason(&eng_id, &0), Some(reason.clone()));
+    assert_eq!(client.get_dispute_reason(&eng_id, &1), None);
+    assert_eq!(client.get_dispute_reason(&eng_id, &2), Some(reason));
+}
+
+#[test]
+fn test_batch_raise_dispute_emits_per_milestone_and_aggregate_events() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-EVT",
+    );
+    for i in 0..3u32 {
+        submit_parallel_proof(&env, &client, &recruiter, &eng_id, i, "p");
+    }
+
+    client.batch_raise_dispute(
+        &company,
+        &eng_id,
+        &vec![&env, 0u32, 1u32, 2u32],
+        &String::from_str(&env, "bad evidence"),
+    );
+
+    assert_eq!(count_events(&env, "dispute_raised"), 3);
+    assert_eq!(count_events(&env, "disputes_batch_raised"), 1);
+}
+
+#[test]
+fn test_batch_raise_dispute_matches_individual_raise_dispute_state() {
+    // Same scenario on two engagements: one disputed via the batch call, the
+    // other via a sequence of individual raise_dispute calls. Per-milestone
+    // stored state must be identical.
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let arbiter_b = Address::generate(&env);
+
+    let batch_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-BATCH",
+    );
+    let single_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter_b, "ENG-BD-SINGLE",
+    );
+    for i in 0..2u32 {
+        submit_parallel_proof(&env, &client, &recruiter, &batch_id, i, "p");
+        submit_parallel_proof(&env, &client, &recruiter, &single_id, i, "q");
+    }
+
+    let reason = String::from_str(&env, "shared reason");
+    client.batch_raise_dispute(&company, &batch_id, &vec![&env, 0u32, 1u32], &reason);
+    client.raise_dispute(&company, &single_id, &0, &reason);
+    client.raise_dispute(&company, &single_id, &1, &reason);
+
+    for i in 0..2u32 {
+        assert_eq!(
+            client.get_milestone(&batch_id, &i).status,
+            client.get_milestone(&single_id, &i).status,
+        );
+        assert_eq!(
+            client.get_dispute_reason(&batch_id, &i),
+            client.get_dispute_reason(&single_id, &i),
+        );
+    }
+
+    // Dispute timeline entries match field for field.
+    let batch_history = client.get_dispute_history(&batch_id);
+    let single_history = client.get_dispute_history(&single_id);
+    assert_eq!(batch_history.len(), 2);
+    assert_eq!(batch_history, single_history);
+
+    // Each panel member was assigned one dispute per milestone.
+    assert_eq!(
+        client.get_arbiter_stats(&arbiter).unwrap().disputes_assigned,
+        client.get_arbiter_stats(&arbiter_b).unwrap().disputes_assigned,
+    );
+    assert_eq!(client.get_arbiter_stats(&arbiter).unwrap().disputes_assigned, 2);
+}
+
+#[test]
+#[should_panic(expected = "EmptyIndices")]
+fn test_batch_raise_dispute_empty_indices_panics() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-EMPTY",
+    );
+    client.batch_raise_dispute(
+        &company,
+        &eng_id,
+        &Vec::new(&env),
+        &String::from_str(&env, "reason"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "can only dispute a submitted proof")]
+fn test_batch_raise_dispute_wrong_status_rejects_batch() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-STATUS",
+    );
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 0, "p");
+    // Milestone 2 is still Pending.
+    client.batch_raise_dispute(
+        &company,
+        &eng_id,
+        &vec![&env, 0u32, 2u32],
+        &String::from_str(&env, "reason"),
+    );
+}
+
+#[test]
+fn test_batch_raise_dispute_wrong_status_leaves_valid_indices_untouched() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-ATOM-S",
+    );
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 0, "p");
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 1, "p");
+
+    // Valid indices 0 and 1 listed before invalid (Pending) index 2.
+    let result = client.try_batch_raise_dispute(
+        &company,
+        &eng_id,
+        &vec![&env, 0u32, 1u32, 2u32],
+        &String::from_str(&env, "reason"),
+    );
+    assert!(result.is_err());
+
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::ProofSubmitted);
+    assert_eq!(client.get_milestone(&eng_id, &1).status, MilestoneStatus::ProofSubmitted);
+    assert_eq!(client.get_dispute_reason(&eng_id, &0), None);
+    assert_eq!(client.get_dispute_reason(&eng_id, &1), None);
+    assert_eq!(client.get_dispute_history(&eng_id).len(), 0);
+}
+
+#[test]
+fn test_batch_raise_dispute_window_closed_rejects_whole_batch() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_dispute_window(&company, &200u32);
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-ATOM-W",
+    );
+    // Milestone 0 submitted at ledger 100 → window closes at 300.
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 0, "p");
+    advance_ledger(&env, 150);
+    // Milestone 1 submitted at ledger 250 → window closes at 450.
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 1, "p");
+    advance_ledger(&env, 100); // ledger 350: 0 is closed, 1 is still open.
+
+    let result = client.try_batch_raise_dispute(
+        &company,
+        &eng_id,
+        &vec![&env, 1u32, 0u32],
+        &String::from_str(&env, "reason"),
+    );
+    assert!(result.is_err());
+    assert_eq!(client.get_milestone(&eng_id, &1).status, MilestoneStatus::ProofSubmitted);
+    assert_eq!(client.get_dispute_reason(&eng_id, &1), None);
+
+    // Milestone 1 alone is still disputable.
+    client.raise_dispute(&company, &eng_id, &1, &String::from_str(&env, "reason"));
+    assert_eq!(client.get_milestone(&eng_id, &1).status, MilestoneStatus::Disputed);
+}
+
+#[test]
+#[should_panic(expected = "DuplicateMilestoneIndex")]
+fn test_batch_raise_dispute_duplicate_index_panics() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-DUP",
+    );
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 0, "p");
+    client.batch_raise_dispute(
+        &company,
+        &eng_id,
+        &vec![&env, 0u32, 0u32],
+        &String::from_str(&env, "reason"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_batch_raise_dispute_non_company_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-AUTH",
+    );
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 0, "p");
+    client.batch_raise_dispute(
+        &recruiter,
+        &eng_id,
+        &vec![&env, 0u32],
+        &String::from_str(&env, "reason"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "ReasonTooLong")]
+fn test_batch_raise_dispute_reason_too_long_panics() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-LONG",
+    );
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 0, "p");
+    let long = "x".repeat(129);
+    client.batch_raise_dispute(
+        &company,
+        &eng_id,
+        &vec![&env, 0u32],
+        &String::from_str(&env, &long),
+    );
+}
